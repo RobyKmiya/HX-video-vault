@@ -26,7 +26,7 @@
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1421 http://localhost:1421; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCACHE/**", "$HOME/**"]
+        "scope": ["$APPCACHE/**/*", "$HOME/**/*", "E:/**/*", "D:/**/*", "F:/**/*"]
       }
     }
   },
