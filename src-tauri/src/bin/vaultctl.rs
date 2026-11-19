@@ -84,6 +84,11 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// 补齐缺失的时长/分辨率（压缩包条目扫描时不计元数据，需要解出来才知道）
+    Probe {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -284,6 +289,35 @@ fn run(cli: &Cli) -> Result<Value, String> {
         Command::Downloads { limit } => {
             let ctx = open(cli)?;
             Ok(json!({ "ok": true, "downloads": db::list_downloads(&ctx.conn, *limit)? }))
+        }
+        Command::Probe { limit } => {
+            let ctx = open(cli)?;
+            let ids = db::ids_without_meta(&ctx.conn, *limit)?;
+            let mut filled = 0;
+            let mut failed: Vec<String> = Vec::new();
+            for id in &ids {
+                // resolve 会把压缩包条目按需解出来，backfill_meta 顺手把元数据写回
+                match video_vault_lib::player::resolve(&ctx, *id) {
+                    Ok(info) => {
+                        let before = db::get_video(&ctx.conn, *id).ok().map(|v| v.duration_sec).unwrap_or(0.0);
+                        video_vault_lib::player::backfill_meta(&ctx, *id, std::path::Path::new(&info.media_path));
+                        let after = db::get_video(&ctx.conn, *id).ok().map(|v| v.duration_sec).unwrap_or(0.0);
+                        if after > 0.0 && after != before {
+                            filled += 1;
+                        } else {
+                            failed.push(format!("#{id}: 取不到时长"));
+                        }
+                    }
+                    Err(e) => failed.push(format!("#{id}: {e}")),
+                }
+            }
+            Ok(json!({
+                "ok": true,
+                "action": "probe",
+                "candidates": ids.len(),
+                "filled": filled,
+                "failed": failed,
+            }))
         }
     }
 }

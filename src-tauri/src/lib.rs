@@ -3,10 +3,10 @@ pub mod downloader;
 pub mod media;
 pub mod models;
 mod mpv;
-mod player;
+pub mod player;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -340,7 +340,14 @@ fn stats(state: State<'_, AppState>) -> Result<Stats, String> {
 #[tauri::command]
 fn playback_info(state: State<'_, AppState>, id: i64) -> Result<PlaybackInfo, String> {
     let ctx = state.lock()?;
-    player::resolve(library(&ctx)?, id)
+    let lib = library(&ctx)?;
+    let mut info = player::resolve(lib, id)?;
+    // 压缩包条目此时才第一次解出真实文件，顺手补上时长/分辨率
+    player::backfill_meta(lib, id, Path::new(&info.media_path));
+    if let Ok(fresh) = db::get_video(&lib.conn, id) {
+        info.video = fresh;
+    }
+    Ok(info)
 }
 
 #[tauri::command]
@@ -367,6 +374,8 @@ async fn make_contact_sheet(state: State<'_, AppState>, id: i64) -> Result<Strin
         if !source.is_file() {
             return Err("视频文件不存在".into());
         }
+        // 抽帧前先补元数据：压缩包条目在扫描时拿不到时长，这里顺手补上
+        player::backfill_meta(lib, id, &source);
         let out = db::LibraryContext::vault_dir(&lib.root)
             .join("cache")
             .join("contacts")
@@ -435,6 +444,8 @@ async fn make_contact_sheets(
                             report.failed.push(format!("#{id}: {e}"));
                             continue;
                         }
+                        // 批量预览正好是「把它解出来」的时机，顺手补元数据
+                        player::backfill_meta(lib, *id, &source);
                     }
                     report.done += 1;
                 }

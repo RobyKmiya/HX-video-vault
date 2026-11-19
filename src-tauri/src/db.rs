@@ -523,6 +523,51 @@ pub fn set_contact_sheet(conn: &Connection, id: i64, path: &str) -> Result<(), S
     Ok(())
 }
 
+/// 回填「见到才知道」的元数据。压缩包内条目在扫描时只读中央目录、不解压，
+/// 所以时长/分辨率是空的；等它第一次被打开或抽帧时顺手补上。
+/// 只在原值为空时写入，绝不覆盖已有数据。
+pub fn backfill_probe(
+    conn: &Connection,
+    id: i64,
+    duration_sec: f64,
+    width: i64,
+    height: i64,
+    codec_video: &str,
+    codec_audio: &str,
+) -> Result<bool, String> {
+    if duration_sec <= 0.0 && width <= 0 && height <= 0 {
+        return Ok(false);
+    }
+    let n = conn
+        .execute(
+            "UPDATE videos SET
+                duration_sec = CASE WHEN duration_sec > 0 THEN duration_sec ELSE ?2 END,
+                width        = CASE WHEN width > 0 THEN width ELSE ?3 END,
+                height       = CASE WHEN height > 0 THEN height ELSE ?4 END,
+                codec_video  = CASE WHEN codec_video <> '' THEN codec_video ELSE ?5 END,
+                codec_audio  = CASE WHEN codec_audio <> '' THEN codec_audio ELSE ?6 END
+             WHERE id = ?1",
+            params![id, duration_sec, width, height, codec_video, codec_audio],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// 还没有时长信息的条目 id（绝大多数是压缩包内条目）。
+pub fn ids_without_meta(conn: &Connection, limit: usize) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM videos WHERE trashed=0 AND duration_sec<=0 ORDER BY id LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![limit as i64], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 fn refresh_tag_text(conn: &Connection, video_id: i64) -> Result<(), String> {
     conn.execute(
         "UPDATE videos SET tag_text=COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM video_tags vt JOIN tags t ON t.id=vt.tag_id WHERE vt.video_id=?1), '') WHERE id=?1",
@@ -1008,6 +1053,44 @@ mod tests {
         assert_eq!(s.video_count, 1);
         assert_eq!(s.watched_count, 1);
         assert_eq!(s.completed_count, 1);
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 压缩包条目入库时时长是 0，等真正解出来再补；补过之后不能被后来的探测覆盖。
+    #[test]
+    fn backfill_fills_missing_meta_but_never_overwrites() {
+        let (root, ctx) = temp_lib();
+        let mut archive = rec("D:\\合集.cbz", 0);
+        archive.duration_sec = 0.0;
+        archive.width = 0;
+        archive.height = 0;
+        archive.codec_video = String::new();
+        archive.codec_audio = String::new();
+        upsert_video(&ctx.conn, &archive).unwrap();
+        let id = ctx.conn.query_row("SELECT id FROM videos", [], |r| r.get::<_, i64>(0)).unwrap();
+
+        // 入库时确实没有元数据
+        assert_eq!(get_video(&ctx.conn, id).unwrap().duration_sec, 0.0);
+        assert!(ids_without_meta(&ctx.conn, 10).unwrap().contains(&id));
+
+        // 第一次解出来 → 补上
+        assert!(backfill_probe(&ctx.conn, id, 1425.5, 1920, 1080, "h264", "aac").unwrap());
+        let filled = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(filled.duration_sec, 1425.5);
+        assert_eq!(filled.width, 1920);
+        assert_eq!(filled.codec_video, "h264");
+        assert!(!ids_without_meta(&ctx.conn, 10).unwrap().contains(&id));
+
+        // 再来一次探测（值不同）→ 原有数据保持不变
+        backfill_probe(&ctx.conn, id, 99.0, 320, 240, "hevc", "opus").unwrap();
+        let again = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(again.duration_sec, 1425.5);
+        assert_eq!(again.width, 1920);
+        assert_eq!(again.codec_video, "h264");
+
+        // 探测不到任何东西时不该写库
+        assert!(!backfill_probe(&ctx.conn, id, 0.0, 0, 0, "", "").unwrap());
         drop(ctx);
         let _ = fs::remove_dir_all(root);
     }
