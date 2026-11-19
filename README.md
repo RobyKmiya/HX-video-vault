@@ -39,7 +39,11 @@ npm run check          # TypeScript
 cargo test --offline --manifest-path src-tauri/Cargo.toml --all-targets   # 本机需 --offline
 npm run build:cli      # vaultctl 发布版
 npm run tauri dev
+npm run release        # 独立发版：抬版本 → 检查 → 打包 NSIS → 装到 %LOCALAPPDATA%\影匣
+npm run release:dry    # 只预演不发版
 ```
+
+> **发版隔离**：`npm run release` 只操作本仓库与 `%LOCALAPPDATA%\影匣`，**不碰画匣**（不读画匣库、不杀画匣进程）。打包前请先手动关掉正在运行的影匣，否则 Windows 会锁住 exe 导致链接失败。
 
 ffmpeg / ffprobe 默认在 PATH 和 `D:\MESAVAGE\Tools\ffmpeg` 探测，也可在设置里指定。
 下载用系统 curl（Windows 自带）；mpv 可选，未安装时播放器自动降级到内置/VLC。
