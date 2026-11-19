@@ -28,8 +28,11 @@ function readMode(): DrawerMode {
 }
 
 function readWidth(): number {
-  const n = Number(localStorage.getItem(WIDTH_KEY));
-  return Number.isFinite(n) && n >= MIN_W && n <= MAX_W ? n : 384;
+  const raw = localStorage.getItem(WIDTH_KEY);
+  const n = Number(raw);
+  if (raw !== null && Number.isFinite(n) && n >= MIN_W && n <= MAX_W) return n;
+  // 窄屏默认收窄一点，别一上来就把网格挤成两列
+  return window.innerWidth < 1180 ? 340 : 384;
 }
 
 export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChanged, onError }: Props) {

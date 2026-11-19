@@ -368,7 +368,6 @@ h1, h2, h3, p { margin: 0; }
 .toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%); background: #1b2030; color: #fff; padding: 10px 16px; border-radius: 9px; font-size: 12.5px; display: flex; align-items: center; gap: 8px; z-index: 90; box-shadow: var(--shadow); max-width: 80vw; }
 
 @media (max-width: 1180px) {
-  .detail-drawer { width: 340px; }
   .main { padding: 0 18px 50px; }
 }
 
