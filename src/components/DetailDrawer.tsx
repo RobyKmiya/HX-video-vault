@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { api } from "../api";
@@ -15,6 +15,23 @@ interface Props {
   onError: (msg: string) => void;
 }
 
+type DrawerMode = "dock" | "wide" | "rail";
+
+const MODE_KEY = "vv-detail-mode";
+const WIDTH_KEY = "vv-detail-width";
+const MIN_W = 320;
+const MAX_W = 780;
+
+function readMode(): DrawerMode {
+  const v = localStorage.getItem(MODE_KEY);
+  return v === "wide" || v === "rail" || v === "dock" ? v : "dock";
+}
+
+function readWidth(): number {
+  const n = Number(localStorage.getItem(WIDTH_KEY));
+  return Number.isFinite(n) && n >= MIN_W && n <= MAX_W ? n : 384;
+}
+
 export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChanged, onError }: Props) {
   const [note, setNote] = useState(video.note);
   const [rating, setRating] = useState(video.rating);
@@ -22,6 +39,10 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
   const [completed, setCompleted] = useState(video.completed);
   const [addedTag, setAddedTag] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<DrawerMode>(readMode);
+  const [width, setWidth] = useState<number>(readWidth);
+  const [resizing, setResizing] = useState(false);
+  const [vw, setVw] = useState(() => window.innerWidth);
 
   useEffect(() => {
     setNote(video.note);
@@ -29,6 +50,49 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
     setFavorite(video.favorite);
     setCompleted(video.completed);
   }, [video.id, video.note, video.rating, video.favorite, video.completed]);
+
+  useEffect(() => { localStorage.setItem(MODE_KEY, mode); }, [mode]);
+  useEffect(() => { if (mode !== "rail") localStorage.setItem(WIDTH_KEY, String(Math.round(width))); }, [width, mode]);
+  useEffect(() => {
+    const onResize = () => setVw(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // 窗口变窄时给主区留出至少 320px，避免详情把网格挤成一条
+  const widthCap = Math.min(MAX_W, Math.max(MIN_W, vw - 236 - 320));
+  const shownWidth = Math.min(width, widthCap);
+
+  // 抽屉占位后主区会重排，当前卡片可能被挤出视野：重新对齐到可视区
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const card = document.querySelector<HTMLElement>(".video-card.selected");
+      card?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [video.id, mode, shownWidth]);
+
+  // 拖左边缘改宽度：抽屉贴右，宽度 = 视口右边界 - 指针 x
+  const startResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    setResizing(true);
+    const move = (ev: PointerEvent) => {
+      const cap = Math.min(MAX_W, Math.max(MIN_W, window.innerWidth - 236 - 320));
+      const next = Math.min(cap, Math.max(MIN_W, window.innerWidth - ev.clientX));
+      setWidth(next);
+    };
+    const up = () => {
+      setResizing(false);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", up);
+  }, []);
 
   const patch = async (p: Partial<{ note: string; rating: number; favorite: boolean; completed: boolean }>) => {
     try {
@@ -66,11 +130,57 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
 
+  // 折叠态：只留一条窄栏，主区几乎全给视频网格
+  if (mode === "rail") {
+    return (
+      <aside className="detail-drawer rail">
+        <button className="rail-btn" onClick={() => setMode("dock")} title="展开详情">
+          <Icon name="left" size={16} />
+        </button>
+        <div className="rail-thumb" onClick={() => setMode("dock")} title={video.file_name}>
+          {cover ? <img src={cover} alt="" /> : <Icon name="play" size={18} />}
+        </div>
+        <button className={`rail-btn ${favorite ? "on" : ""}`} title={favorite ? "取消收藏" : "收藏"}
+          onClick={() => { setFavorite(!favorite); void patch({ favorite: !favorite }); }}>
+          <Icon name="heart" size={16} />
+        </button>
+        <button className="rail-btn" title="播放" onClick={() => onPlay(video)}>
+          <Icon name="play" size={16} />
+        </button>
+        <div className="rail-spacer" />
+        <button className="rail-btn" title="关闭详情" onClick={onClose}>
+          <Icon name="x" size={16} />
+        </button>
+      </aside>
+    );
+  }
+
   return (
-    <aside className="detail-drawer">
+    <aside
+      className={`detail-drawer ${mode} ${resizing ? "resizing" : ""}`}
+      style={{ width: shownWidth }}
+    >
+      <div
+        className="detail-resizer"
+        onPointerDown={startResize}
+        onDoubleClick={() => setWidth(384)}
+        title="拖动调宽度，双击复位"
+      />
       <div className="detail-head">
         <span className="detail-kicker">视频详情</span>
-        <button className="icon-btn" onClick={onClose} title="关闭"><Icon name="x" size={18} /></button>
+        <div className="detail-head-actions">
+          <button
+            className="icon-btn"
+            onClick={() => setMode(mode === "wide" ? "dock" : "wide")}
+            title={mode === "wide" ? "收窄详情" : "加宽详情（便于编辑备注）"}
+          >
+            <Icon name={mode === "wide" ? "right" : "left"} size={17} />
+          </button>
+          <button className="icon-btn" onClick={() => setMode("rail")} title="折叠详情">
+            <Icon name="menu" size={17} />
+          </button>
+          <button className="icon-btn" onClick={onClose} title="关闭（Esc）"><Icon name="x" size={18} /></button>
+        </div>
       </div>
       <div className="detail-scroll">
         <div className="detail-cover" style={{ aspectRatio: coverRatio }} onClick={() => onPlay(video)}>
@@ -187,7 +297,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
             onChange={(e) => setNote(e.target.value)}
             onBlur={() => { if (note !== video.note) void patch({ note }); }}
             placeholder="写点什么…剧情、演员、想看的理由"
-            rows={5}
+            rows={mode === "wide" ? 10 : 5}
           />
         </div>
 
