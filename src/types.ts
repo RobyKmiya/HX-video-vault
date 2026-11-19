@@ -113,6 +113,14 @@ export interface Settings {
   ffmpeg_path: string | null;
   ffprobe_path: string | null;
   player_pref: string;
+  mpv_path: string | null;
+}
+
+export interface EngineInfo {
+  name: string;
+  available: boolean;
+  path: string;
+  note: string;
 }
 
 export interface WatchRecord {

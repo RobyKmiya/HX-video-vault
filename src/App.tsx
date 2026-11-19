@@ -41,7 +41,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [settings, setSettings] = useState<Settings>({
-    library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto",
+    library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto", mpv_path: null,
   });
   const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -150,8 +150,10 @@ export default function App() {
 
   const openPlayer = async (video: VideoItem) => {
     try {
+      // mpv 可用时优先用它（支持字幕/倍速/进度 IPC 回传）
+      const took = await api.mpvOpen(video.id).catch(() => false);
       const result = await api.playback(video.id);
-      setPlayer(result);
+      setPlayer({ ...result, source: took ? "mpv" : result.source });
       await refreshMeta();
     } catch (e) { notify(String(e)); }
   };
@@ -382,7 +384,7 @@ export default function App() {
       {player && (
         <Player
           info={player}
-          onClose={() => { setPlayer(null); void refreshMeta(); void loadVideos(true); }}
+          onClose={() => { if (player?.source === "mpv") void api.mpvClose(); setPlayer(null); void refreshMeta(); void loadVideos(true); }}
           onNext={() => movePlayer(1)}
           onPrev={() => movePlayer(-1)}
           onError={notify}
@@ -441,12 +443,18 @@ function SettingsModal({
               onChange={(e) => setDraft((d) => ({ ...d, ffprobe_path: e.target.value || null }))} />
           </div>
           <div className="field">
-            <label>外部播放器</label>
+            <label>播放器内核</label>
             <select value={draft.player_pref} onChange={(e) => setDraft((d) => ({ ...d, player_pref: e.target.value }))}>
-              <option value="auto">自动（优先 VLC）</option>
-              <option value="vlc">VLC</option>
-              <option value="mpv">mpv</option>
+              <option value="auto">自动（优先 mpv，其次内置）</option>
+              <option value="builtin">内置播放器（mp4/webm）</option>
+              <option value="mpv">mpv（IPC · 字幕/倍速/截图）</option>
+              <option value="vlc">VLC（冷门格式兜底）</option>
             </select>
+          </div>
+          <div className="field">
+            <label>mpv 可执行文件路径（可选）</label>
+            <input value={draft.mpv_path || ""} placeholder="留空则自动探测；例如 D:\\TOOLS\\mpv\\mpv.exe"
+              onChange={(e) => setDraft((d) => ({ ...d, mpv_path: e.target.value || null }))} />
           </div>
           <p className="hint">修改 ffmpeg 路径后需重启影匣生效。影片文件不会被移动或上传。</p>
         </div>

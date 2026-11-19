@@ -1,6 +1,7 @@
 mod db;
 mod media;
 mod models;
+mod mpv;
 mod player;
 
 use std::fs;
@@ -23,8 +24,13 @@ pub struct Settings {
     pub library_root: Option<String>,
     pub ffmpeg_path: Option<String>,
     pub ffprobe_path: Option<String>,
+    #[serde(default = "default_player_pref")]
     pub player_pref: String,
+    #[serde(default)]
+    pub mpv_path: Option<String>,
 }
+
+fn default_player_pref() -> String { "auto".into() }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -33,6 +39,7 @@ impl Default for Settings {
             ffmpeg_path: None,
             ffprobe_path: None,
             player_pref: "auto".into(),
+            mpv_path: None,
         }
     }
 }
@@ -41,6 +48,7 @@ struct AppInner {
     library: Option<LibraryContext>,
     settings: Settings,
     startup_error: Option<String>,
+    mpv: Option<Arc<mpv::MpvSession>>,
 }
 
 #[derive(Clone)]
@@ -69,6 +77,7 @@ impl AppState {
                 library,
                 settings,
                 startup_error,
+                mpv: None,
             })),
         }
     }
@@ -437,6 +446,66 @@ fn watch_history(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec
     db::watch_history(&library(&ctx)?.conn, limit.unwrap_or(50).clamp(1, 500))
 }
 
+#[tauri::command]
+fn player_engines(state: State<'_, AppState>) -> Result<Vec<mpv::EngineInfo>, String> {
+    let ctx = state.lock()?;
+    Ok(mpv::engines(ctx.settings.mpv_path.as_deref()))
+}
+
+/// 用 mpv IPC 打开一条视频。返回 true 表示已接管，false 表示调用方应退回内置播放器。
+#[tauri::command]
+async fn mpv_open(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: i64,
+    wid: Option<String>,
+) -> Result<bool, String> {
+    let state_inner = state.inner().clone();
+    let pref = state_inner.lock()?.settings.player_pref.clone();
+    if &pref == "builtin" || &pref == "vlc" {
+        return Ok(false);
+    }
+    let configured = state_inner.lock()?.settings.mpv_path.clone();
+    let Some(path) = mpv::find_mpv(configured.as_deref()) else {
+        return Ok(false);
+    };
+    // 先停掉旧会话（mpv 进程）
+    if let Some(old) = state_inner.lock()?.mpv.take() {
+        old.stop();
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = state_inner.lock()?;
+        let lib = library(&guard)?;
+        let info = player::resolve(lib, id)?;
+        let media = PathBuf::from(&info.media_path);
+        if !media.is_file() {
+            return Err("视频文件不存在".into());
+        }
+        let session = mpv::MpvSession::start(app, &path, &media, info.start_sec, wid)?;
+        drop(guard);
+        state_inner.lock()?.mpv = Some(Arc::new(session));
+        Ok(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn mpv_command(state: State<'_, AppState>, action: String, value: Option<serde_json::Value>) -> Result<(), String> {
+    let ctx = state.lock()?;
+    let session = ctx.mpv.as_ref().ok_or("mpv 播放器未启动")?;
+    let cmd = mpv::command_from(&action, value)?;
+    session.send(cmd)
+}
+
+#[tauri::command]
+fn mpv_close(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(session) = state.lock()?.mpv.take() {
+        session.stop();
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -472,6 +541,10 @@ pub fn run() {
             make_contact_sheet,
             make_contact_sheets,
             watch_history,
+            player_engines,
+            mpv_open,
+            mpv_command,
+            mpv_close,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
+  EngineInfo,
   LibraryInfo,
   PlaybackInfo,
   ScanReport,
@@ -56,4 +57,8 @@ export const api = {
   contactSheets: (ids: number[] | null, limit?: number) =>
     invoke<SheetReport>("make_contact_sheets", { ids, limit }),
   watchHistory: (limit?: number) => invoke<WatchRecord[]>("watch_history", { limit }),
+  engines: () => invoke<EngineInfo[]>("player_engines"),
+  mpvOpen: (id: number, wid?: string) => invoke<boolean>("mpv_open", { id, wid }),
+  mpvCommand: (action: string, value?: unknown) => invoke<void>("mpv_command", { action, value }),
+  mpvClose: () => invoke<void>("mpv_close"),
 };

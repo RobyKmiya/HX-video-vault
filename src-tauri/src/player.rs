@@ -65,6 +65,8 @@ pub fn resolve(ctx: &LibraryContext, id: i64) -> Result<PlaybackInfo, String> {
     })
 }
 
+pub(crate) fn find_vlc_public() -> Option<PathBuf> { find_vlc() }
+
 fn find_vlc() -> Option<PathBuf> {
     for p in [
         r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",

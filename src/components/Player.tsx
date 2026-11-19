@@ -28,21 +28,47 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
   const [controls, setControls] = useState(true);
   const lastSave = useRef(0);
   const hideTimer = useRef<number | undefined>(undefined);
+  const isMpv = info.source === "mpv";
 
   const save = useCallback((force = false) => {
     const v = videoRef.current;
-    if (!v || !Number.isFinite(v.currentTime)) return;
+    const sec = isMpv ? current : v?.currentTime;
+    if (!Number.isFinite(sec)) return;
     const now = Date.now();
     if (!force && now - lastSave.current < 5000) return;
     lastSave.current = now;
     void api
-      .watch({ id: info.video.id, progress_sec: v.currentTime, duration_sec: v.duration || duration })
+      .watch({ id: info.video.id, progress_sec: sec as number, duration_sec: duration || info.video.duration_sec })
       .catch((e) => onError(String(e)));
-  }, [info.video.id, duration, onError]);
+  }, [info.video.id, info.video.duration_sec, duration, isMpv, current, onError]);
+
+  // mpv 模式：进度/时长/暂停由 IPC 事件推送，不依赖 <video> 元素
+  useEffect(() => {
+    if (!isMpv) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      return listen("mpv-property", (e) => {
+        const p = e.payload as { name: string; data: unknown };
+        if (p.name === "time-pos" && typeof p.data === "number") setCurrent(p.data);
+        if (p.name === "duration" && typeof p.data === "number") setDuration(p.data);
+        if (p.name === "pause") setPlaying(p.data !== true);
+      });
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn; }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, [isMpv]);
+
+  useEffect(() => {
+    if (!isMpv) return;
+    const timer = window.setInterval(() => {
+      void api.mpvCommand("get_time").catch(() => {});
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [isMpv]);
 
   useEffect(() => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || isMpv) return;
     if (info.start_sec > 0) {
       const onMeta = () => {
         if (Number.isFinite(v.duration)) {
@@ -54,12 +80,19 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
       return () => v.removeEventListener("loadedmetadata", onMeta);
     }
     void v.play().catch(() => setPlaying(false));
-  }, [info.start_sec, info.media_path]);
+  }, [info.start_sec, info.media_path, isMpv]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const v = videoRef.current;
       if (e.key === "Escape") { save(true); onClose(); return; }
+      if (isMpv) {
+        if (e.key === " ") { e.preventDefault(); void api.mpvCommand("toggle"); }
+        else if (e.key === "ArrowRight") void api.mpvCommand("seek_relative", 5);
+        else if (e.key === "ArrowLeft") void api.mpvCommand("seek_relative", -5);
+        else if (e.key.toLowerCase() === "f") void wrapRef.current?.requestFullscreen?.();
+        return;
+      }
       if (!v) return;
       if (e.key === " ") {
         e.preventDefault();
@@ -80,7 +113,7 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, save]);
+  }, [onClose, save, isMpv]);
 
   useEffect(() => () => save(true), [save]);
 
@@ -93,13 +126,20 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
   };
 
   const seek = (e: MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const sec = ((e.clientX - rect.left) / rect.width) * duration;
+    if (isMpv) { void api.mpvCommand("seek", sec); return; }
     const v = videoRef.current;
     if (!v || !Number.isFinite(v.duration)) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    v.currentTime = ((e.clientX - rect.left) / rect.width) * v.duration;
+    v.currentTime = sec;
   };
 
   const snapshot = () => {
+    if (isMpv) {
+      const name = `${info.video.file_name.replace(/[\\/:*?"<>|]/g, "_")}-${Math.floor(current)}s.png`;
+      void api.mpvCommand("screenshot", name).catch((e) => onError(String(e)));
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     const canvas = document.createElement("canvas");
@@ -113,11 +153,19 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
   };
 
   const external = info.source === "external" || info.source === "missing";
+  const controlsVisible = !external && (isMpv || controls);
 
   return (
     <div className="player-overlay" ref={wrapRef} onMouseMove={poke}>
       <div className="player-stage" onClick={poke}>
-        {external ? (
+        {isMpv ? (
+          <div className="player-external">
+            <Icon name="play" size={38} />
+            <h2>mpv 播放器已接管</h2>
+            <p>视频在 mpv 窗口中播放。下方控制条会同步进度、倍速与音量，进度自动写回影匣。</p>
+            <span className="muted">按 Esc 返回 · 空格暂停/继续 · ←→ 快退快进</span>
+          </div>
+        ) : external ? (
           <div className="player-external">
             <Icon name="info" size={38} />
             <h2>这个格式需要外部播放器</h2>
@@ -162,8 +210,8 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
         </div>
       </div>
 
-      {!external && (
-        <div className={`player-controls ${controls ? "" : "hidden"}`}>
+      {controlsVisible && (
+        <div className={`player-controls ${controls || isMpv ? "" : "hidden"}`}>
           <div className="seek" onClick={seek}>
             <span className="seek-fill" style={{ width: `${duration ? (current / duration) * 100 : 0}%` }} />
             <span className="seek-knob" style={{ left: `${duration ? (current / duration) * 100 : 0}%` }} />
@@ -171,6 +219,7 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
           <div className="control-row">
             <button className="player-round" onClick={onPrev} title="上一条"><Icon name="back" size={18} /></button>
             <button className="player-round primary" onClick={() => {
+              if (isMpv) { void api.mpvCommand("toggle"); return; }
               const v = videoRef.current;
               if (!v) return;
               if (v.paused) void v.play(); else v.pause();
@@ -181,11 +230,17 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
             <span className="time-label">{formatDuration(current)} <span>/</span> {formatDuration(duration)}</span>
             <div className="control-spacer" />
             <button className="player-round" onClick={() => {
-              const v = videoRef.current; if (!v) return;
               const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
-              v.playbackRate = next; setSpeed(next);
+              setSpeed(next);
+              if (isMpv) { void api.mpvCommand("speed", next); return; }
+              const v = videoRef.current; if (v) v.playbackRate = next;
             }} title="倍速">{speed}×</button>
             <button className="player-round" onClick={() => {
+              if (isMpv) {
+                const next = !muted; setMuted(next);
+                void api.mpvCommand("volume", next ? 0 : volume * 100);
+                return;
+              }
               const v = videoRef.current; if (!v) return;
               v.muted = !v.muted; setMuted(v.muted);
             }} title="静音"><Icon name="volume" size={18} style={{ opacity: muted ? 0.4 : 1 }} /></button>
@@ -195,8 +250,9 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
               onChange={(e) => {
                 const val = Number(e.target.value);
                 setVolume(val);
-                if (videoRef.current) { videoRef.current.volume = val; videoRef.current.muted = val === 0; }
                 setMuted(val === 0);
+                if (isMpv) { void api.mpvCommand("volume", val * 100); return; }
+                if (videoRef.current) { videoRef.current.volume = val; videoRef.current.muted = val === 0; }
               }}
             />
             <button className="player-round" onClick={snapshot} title="截图"><Icon name="camera" size={18} /></button>
