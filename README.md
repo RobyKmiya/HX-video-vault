@@ -29,7 +29,16 @@
 - [x] mpv JSON IPC 内核（字幕/倍速/截图/进度事件，未安装时自动降级）
 - [x] 批量接触表生成 + 观看记录报表 + 库容量按文件去重
 - [x] 网页链接下载器（curl 解析直链 / 断点续传 / 联网自动续跑 / 下载后自动入库打标）
-- [x] `vaultctl` CLI：stats / search / video / tags / collections / scan / import / watch / downloads，全 JSON 输出
+- [x] `vaultctl` CLI：stats / search / video / tags / collections / scan / import / watch / downloads / probe，全 JSON 输出
+
+## 设计取舍：压缩包条目的元数据是「见到才补」
+
+扫描压缩包时只读中央目录、不解压内容（千条条目也秒级完成），所以包内条目的时长/分辨率入库时为空。
+等它第一次被**播放**、**抽帧**或执行 `vaultctl probe` 时，文件已被解出来，顺手把元数据写回库。
+回填只填空位、绝不覆盖已有数据。
+
+> 别用 `entry_index == 0` 判断「这是个普通文件」——压缩包第一集的索引也是 0。
+> 判断是否压缩包请用 `media::is_supported_archive()`，否则第一集会直接把 `.cbz` 交给播放器。
 
 ## 开发
 
@@ -54,6 +63,7 @@ ffmpeg / ffprobe 默认在 PATH 和 `D:\MESAVAGE\Tools\ffmpeg` 探测，也可�
 src-tauri/target/debug/vaultctl.exe --library E:\影匣库 stats --compact
 src-tauri/target/debug/vaultctl.exe --library E:\影匣库 search --query 风景 --compact
 src-tauri/target/debug/vaultctl.exe --library E:\影匣库 import --paths D:\a.mp4 --compact
+src-tauri/target/debug/vaultctl.exe --library E:\影匣库 probe --limit 100 --compact   # 补齐压缩包条目时长
 ```
 
 ## 路线图
