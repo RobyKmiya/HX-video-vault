@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
+    "build:cli": "cargo build --manifest-path src-tauri/Cargo.toml --release --bin vaultctl",
     "preview": "vite preview",
     "tauri": "tauri"
   },

@@ -26,17 +26,31 @@
 - [x] 统计面板（库容量、观看覆盖、最近入库、标签分布）
 - [x] 接触表预览（ffmpeg 4×4 抽帧）、内置播放器（倍速/音量/截图/全屏/续播）
 - [x] 外部 VLC 播放（从上次位置续播）
+- [x] mpv JSON IPC 内核（字幕/倍速/截图/进度事件，未安装时自动降级）
+- [x] 批量接触表生成 + 观看记录报表 + 库容量按文件去重
+- [x] 网页链接下载器（curl 解析直链 / 断点续传 / 联网自动续跑 / 下载后自动入库打标）
+- [x] `vaultctl` CLI：stats / search / video / tags / collections / scan / import / watch / downloads，全 JSON 输出
 
 ## 开发
 
 ```bash
 npm install
 npm run check          # TypeScript
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo test --offline --manifest-path src-tauri/Cargo.toml --all-targets   # 本机需 --offline
+npm run build:cli      # vaultctl 发布版
 npm run tauri dev
 ```
 
 ffmpeg / ffprobe 默认在 PATH 和 `D:\MESAVAGE\Tools\ffmpeg` 探测，也可在设置里指定。
+下载用系统 curl（Windows 自带）；mpv 可选，未安装时播放器自动降级到内置/VLC。
+
+### vaultctl 示例
+
+```bash
+src-tauri/target/debug/vaultctl.exe --library E:\影匣库 stats --compact
+src-tauri/target/debug/vaultctl.exe --library E:\影匣库 search --query 风景 --compact
+src-tauri/target/debug/vaultctl.exe --library E:\影匣库 import --paths D:\a.mp4 --compact
+```
 
 ## 路线图
 

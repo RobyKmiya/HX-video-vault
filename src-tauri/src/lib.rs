@@ -1,7 +1,7 @@
-mod db;
-mod downloader;
-mod media;
-mod models;
+pub mod db;
+pub mod downloader;
+pub mod media;
+pub mod models;
 mod mpv;
 mod player;
 
