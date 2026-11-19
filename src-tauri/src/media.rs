@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
@@ -129,7 +128,7 @@ pub fn probe(path: &Path) -> MediaMeta {
     let Some(ffprobe) = find_tool("ffprobe") else {
         return MediaMeta::default();
     };
-    let output = Command::new(ffprobe)
+    let output = crate::proc::quiet(ffprobe)
         .args([
             "-v", "quiet",
             "-print_format", "json",
@@ -329,7 +328,7 @@ pub fn contact_sheet(source: &Path, out: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let filter = "fps=1/45,scale=240:-2,tile=4x4:margin=2:padding=2";
-    let status = Command::new(ffmpeg)
+    let status = crate::proc::quiet(ffmpeg)
         .args([
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", &source.to_string_lossy(),

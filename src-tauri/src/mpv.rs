@@ -9,7 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -120,7 +120,7 @@ impl MpvSession {
         }
         args.push(media.to_string_lossy().to_string());
 
-        let child = Command::new(mpv_path)
+        let child = crate::proc::quiet(mpv_path)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

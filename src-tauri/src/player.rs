@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
@@ -111,7 +110,7 @@ fn find_vlc() -> Option<PathBuf> {
 pub fn launch_external(path: &Path, start_sec: f64) -> Result<String, String> {
     if let Some(vlc) = find_vlc() {
         let secs = start_sec.max(0.0) as u64;
-        Command::new(vlc)
+        crate::proc::quiet(vlc)
             .arg(format!("--start-time={secs}"))
             .arg("--no-video-title-show")
             .arg(path)
@@ -121,7 +120,7 @@ pub fn launch_external(path: &Path, start_sec: f64) -> Result<String, String> {
     }
     if let Some(mpv) = media::find_tool("mpv") {
         let secs = start_sec.max(0.0);
-        Command::new(mpv)
+        crate::proc::quiet(mpv)
             .arg(format!("--start={secs}"))
             .arg(path)
             .spawn()

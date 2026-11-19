@@ -4,6 +4,7 @@ pub mod media;
 pub mod models;
 mod mpv;
 pub mod player;
+mod proc;
 
 use std::fs;
 use std::path::{Path, PathBuf};

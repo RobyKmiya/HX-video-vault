@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use regex::Regex;
@@ -45,7 +45,7 @@ fn site_of(url: &str) -> String {
 /// 抓页面 HTML。只用于解析直链，绝不上传本地库内容。
 fn fetch_html(url: &str) -> Result<String, String> {
     let curl = find_curl().ok_or("未找到 curl，无法访问链接")?;
-    let out = Command::new(curl)
+    let out = crate::proc::quiet(curl)
         .args(["-sSL", "--max-time", "20", "-A", UA])
         .arg(url)
         .output()
@@ -158,7 +158,7 @@ pub fn download_one(
     args.push("%{size_download} %{content_type}".into());
     args.push(url.into());
 
-    let mut child = Command::new(curl)
+    let mut child = crate::proc::quiet(curl)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -212,7 +212,7 @@ fn percent_decode(s: &str) -> String {
 /// 检查网络是否可达（给「联网后自动续跑」用）。
 pub fn network_ok() -> bool {
     let Some(curl) = find_curl() else { return false; };
-    Command::new(curl)
+    crate::proc::quiet(curl)
         .args(["-s", "--max-time", "6", "-o", "NUL", "https://www.baidu.com"])
         .stdout(Stdio::null()).stderr(Stdio::null())
         .status()
