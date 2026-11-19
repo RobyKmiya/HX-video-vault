@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
 use db::LibraryContext;
@@ -361,6 +361,82 @@ async fn make_contact_sheet(state: State<'_, AppState>, id: i64) -> Result<Strin
     .map_err(|e| e.to_string())?
 }
 
+/// 批量生成接触表。逐条短事务：每条做完立即释放锁，
+/// 避免长时间持锁让搜索/播放等命令卡住。前端传窗口标题用来显示进度。
+#[tauri::command]
+async fn make_contact_sheets(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Option<Vec<i64>>,
+    limit: Option<usize>,
+) -> Result<crate::models::SheetReport, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 先短锁取出待办 id 与输出目录
+        let (targets, cache_dir) = {
+            let guard = state.lock()?;
+            let lib = library(&guard)?;
+            let ids = match ids {
+                Some(v) => v,
+                None => db::ids_without_sheet(&lib.conn, limit.unwrap_or(40).clamp(1, 500))?,
+            };
+            (ids, crate::db::LibraryContext::vault_dir(&lib.root).join("cache").join("contacts"))
+        };
+        let total = targets.len();
+        let mut report = crate::models::SheetReport {
+            total, done: 0, skipped: 0, failed: Vec::new(),
+        };
+        for (i, id) in targets.iter().enumerate() {
+            let _ = app.emit("sheet-progress", serde_json::json!({
+                "done": i, "total": total, "id": id,
+            }));
+            // 每条单独解析来源，短锁读库
+            let source = {
+                let guard = state.lock()?;
+                let lib = library(&guard)?;
+                match player::resolve(lib, *id) {
+                    Ok(info) => Ok(PathBuf::from(info.media_path)),
+                    Err(e) => Err(e),
+                }
+            };
+            let source = match source {
+                Ok(p) => p,
+                Err(e) => { report.failed.push(format!("#{id}: {e}")); continue; }
+            };
+            if !source.is_file() {
+                report.skipped += 1;
+                continue;
+            }
+            let out = cache_dir.join(format!("{id}.jpg"));
+            match media::contact_sheet(&source, &out) {
+                Ok(()) => {
+                    let guard = state.lock()?;
+                    if let Ok(lib) = guard.library.as_ref().ok_or("库未打开") {
+                        if let Err(e) = db::set_contact_sheet(&lib.conn, *id, &out.to_string_lossy()) {
+                            report.failed.push(format!("#{id}: {e}"));
+                            continue;
+                        }
+                    }
+                    report.done += 1;
+                }
+                Err(e) => report.failed.push(format!("#{id}: {e}")),
+            }
+        }
+        let _ = app.emit("sheet-progress", serde_json::json!({
+            "done": total, "total": total, "id": 0,
+        }));
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn watch_history(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<crate::models::WatchRecord>, String> {
+    let ctx = state.lock()?;
+    db::watch_history(&library(&ctx)?.conn, limit.unwrap_or(50).clamp(1, 500))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -394,6 +470,8 @@ pub fn run() {
             playback_info,
             play_external,
             make_contact_sheet,
+            make_contact_sheets,
+            watch_history,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

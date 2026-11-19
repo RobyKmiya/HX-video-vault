@@ -135,3 +135,23 @@ pub struct LibraryInfo {
     pub video_count: i64,
     pub schema_version: i64,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WatchRecord {
+    pub id: i64,
+    pub video_id: i64,
+    pub file_name: String,
+    pub watched_at: i64,
+    pub from_sec: f64,
+    pub to_sec: f64,
+    pub duration_sec: f64,
+    pub finished: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SheetReport {
+    pub total: usize,
+    pub done: usize,
+    pub skipped: usize,
+    pub failed: Vec<String>,
+}

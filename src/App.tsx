@@ -67,6 +67,7 @@ export default function App() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [sheetProgress, setSheetProgress] = useState<{ done: number; total: number } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const notify = useCallback((msg: string) => {
@@ -115,6 +116,21 @@ export default function App() {
     void refreshMeta();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, info, view, debouncedSearch, activeTag, activeCollection, sort]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      return listen("sheet-progress", (e) => {
+        const p = e.payload as { done: number; total: number };
+        setSheetProgress({ done: p.done, total: p.total });
+        if (p.done >= p.total) window.setTimeout(() => setSheetProgress(null), 1200);
+      });
+    }).then((fn) => {
+      if (cancelled) fn(); else unlisten = fn;
+    }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -232,7 +248,13 @@ export default function App() {
 
       <main className="main">
         {showPanel ? (
-          statsOpen ? <StatsPanel stats={stats} onClose={() => setStatsOpen(false)} />
+          statsOpen ? <StatsPanel stats={stats} onClose={() => setStatsOpen(false)} onOpenVideo={(id) => {
+            setStatsOpen(false);
+            void api.playback(id).then((p) => {
+              setPlayer(p);
+              void loadVideos(true);
+            }).catch((e) => notify(String(e)));
+          }} />
             : <TagManager tags={tags} onClose={() => setTagsOpen(false)} onChanged={() => { void refreshMeta(); void loadVideos(true); }} onError={notify} />
         ) : (
           <>
@@ -252,6 +274,16 @@ export default function App() {
               </select>
               <button className="btn" onClick={doScan} disabled={scanning}>
                 <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanning ? "扫描中…" : "扫描库"}
+              </button>
+              <button className="btn" onClick={async () => {
+                try {
+                  const r = await api.contactSheets(null, 40);
+                  notify(`预览图：完成 ${r.done}，跳过 ${r.skipped}，失败 ${r.failed.length}`);
+                  await Promise.all([loadVideos(true), refreshMeta()]);
+                } catch (e) { notify(String(e)); }
+              }} disabled={!!sheetProgress} title="为最近入库、尚无预览图的视频批量抽帧">
+                <Icon name="camera" size={16} />
+                {sheetProgress ? `${sheetProgress.done}/${sheetProgress.total}` : "批量预览"}
               </button>
               <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="设置"><Icon name="settings" size={18} /></button>
             </header>

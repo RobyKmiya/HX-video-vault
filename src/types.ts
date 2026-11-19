@@ -115,6 +115,24 @@ export interface Settings {
   player_pref: string;
 }
 
+export interface WatchRecord {
+  id: number;
+  video_id: number;
+  file_name: string;
+  watched_at: number;
+  from_sec: number;
+  to_sec: number;
+  duration_sec: number;
+  finished: boolean;
+}
+
+export interface SheetReport {
+  total: number;
+  done: number;
+  skipped: number;
+  failed: string[];
+}
+
 export interface PlaybackInfo {
   video: VideoItem;
   source: string;

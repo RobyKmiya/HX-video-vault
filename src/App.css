@@ -268,6 +268,14 @@ h1, h2, h3, p { margin: 0; }
 .donut-inner span { font-size: 11px; color: var(--muted); }
 .donut-legend { display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
 .legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 7px; }
+.history-list { display: flex; flex-direction: column; }
+.history-row { display: flex; align-items: center; gap: 12px; width: 100%; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 9px 2px; text-align: left; font-size: 12.5px; }
+.history-row:last-child { border-bottom: 0; }
+.history-row:hover { background: var(--surface-2); }
+.history-icon { width: 24px; height: 24px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: 0 0 auto; }
+.history-title { flex: 1; min-width: 0; }
+.history-range { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.history-time { color: #a3abba; font-size: 10.5px; white-space: nowrap; }
 .tag-cloud { display: flex; flex-wrap: wrap; gap: 8px; }
 .cloud-pill { background: var(--surface-2); border-radius: 6px; padding: 5px 10px; font-size: 12px; }
 .cloud-pill b { color: var(--accent); margin-left: 4px; }

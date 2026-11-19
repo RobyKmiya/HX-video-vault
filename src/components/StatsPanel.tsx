@@ -1,13 +1,18 @@
+import { useEffect, useState } from "react";
 import { Icon } from "./Icons";
-import { formatBytes, formatDuration } from "../format";
-import type { Stats } from "../types";
+import { api } from "../api";
+import { formatBytes, formatDuration, relativeTime } from "../format";
+import type { Stats, WatchRecord } from "../types";
 
 interface Props {
   stats: Stats;
   onClose: () => void;
+  onOpenVideo: (id: number) => void;
 }
 
-export function StatsPanel({ stats, onClose }: Props) {
+export function StatsPanel({ stats, onClose, onOpenVideo }: Props) {
+  const [history, setHistory] = useState<WatchRecord[]>([]);
+  useEffect(() => { api.watchHistory(30).then(setHistory).catch(() => {}); }, [stats]);
   const cards = [
     { label: "视频条目", value: stats.video_count.toLocaleString(), icon: "grid" as const },
     { label: "文件 / 压缩包", value: stats.archive_count.toLocaleString(), icon: "folder" as const },
@@ -65,6 +70,21 @@ export function StatsPanel({ stats, onClose }: Props) {
             </div>
           </div>
         </div>
+      </div>
+      <div className="panel-card">
+        <h2>观看记录</h2>
+        {history.length === 0 ? <p className="muted">还没有观看记录</p> : (
+          <div className="history-list">
+            {history.map((h) => (
+              <button key={h.id} className="history-row" onClick={() => onOpenVideo(h.video_id)} title="打开这条视频">
+                <span className="history-icon"><Icon name={h.finished ? "check" : "play"} size={14} /></span>
+                <span className="history-title truncate">{h.file_name}</span>
+                <span className="history-range">{formatDuration(h.from_sec)} → {formatDuration(h.to_sec)}</span>
+                <span className="history-time">{relativeTime(h.watched_at)}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="panel-card">
         <h2>标签分布</h2>

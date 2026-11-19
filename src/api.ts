@@ -5,6 +5,8 @@ import type {
   PlaybackInfo,
   ScanReport,
   Settings,
+  SheetReport,
+  WatchRecord,
   Stats,
   Tag,
   VideoItem,
@@ -51,4 +53,7 @@ export const api = {
   playback: (id: number) => invoke<PlaybackInfo>("playback_info", { id }),
   playExternal: (id: number) => invoke<string>("play_external", { id }),
   contactSheet: (id: number) => invoke<string>("make_contact_sheet", { id }),
+  contactSheets: (ids: number[] | null, limit?: number) =>
+    invoke<SheetReport>("make_contact_sheets", { ids, limit }),
+  watchHistory: (limit?: number) => invoke<WatchRecord[]>("watch_history", { limit }),
 };
