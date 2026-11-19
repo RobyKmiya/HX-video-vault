@@ -100,6 +100,12 @@ pub struct ScanReport {
     pub updated: usize,
     pub missing: usize,
     pub skipped: usize,
+    /// 本次真正调用 ffprobe 的条目数
+    #[serde(default)]
+    pub probed: usize,
+    /// 因为文件没变而跳过的条目数
+    #[serde(default)]
+    pub reused: usize,
     pub errors: Vec<String>,
 }
 

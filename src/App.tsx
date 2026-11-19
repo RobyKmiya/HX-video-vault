@@ -14,6 +14,7 @@ import type {
   Collection,
   LibraryInfo,
   PlaybackInfo,
+  ScanProgress,
   Settings,
   Stats,
   Tag,
@@ -30,6 +31,13 @@ const SORTS = [
   { key: "count", label: "观看次数" },
   { key: "rating", label: "评分" },
 ];
+
+const SCAN_PHASE: Record<ScanProgress["phase"], string> = {
+  walk: "清点",
+  probe: "识别",
+  write: "入库",
+  done: "完成",
+};
 
 const EMPTY_PAGE: VideoPage = { items: [], total: 0, page: 1, page_size: 48 };
 const EMPTY_STATS: Stats = {
@@ -66,11 +74,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sheetProgress, setSheetProgress] = useState<{ done: number; total: number } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const reloadRef = useRef<() => void>(() => {});
+  const lastScanRefresh = useRef(0);
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -120,6 +131,10 @@ export default function App() {
   }, [ready, info, view, debouncedSearch, activeTag, activeCollection, sort]);
 
   useEffect(() => {
+    reloadRef.current = () => void loadVideos(true);
+  }, [loadVideos]);
+
+  useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void import("@tauri-apps/api/event").then(({ listen }) => {
@@ -127,6 +142,29 @@ export default function App() {
         const p = e.payload as { done: number; total: number };
         setSheetProgress({ done: p.done, total: p.total });
         if (p.done >= p.total) window.setTimeout(() => setSheetProgress(null), 1200);
+      });
+    }).then((fn) => {
+      if (cancelled) fn(); else unlisten = fn;
+    }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
+
+  // 扫描进度：清点 → 识别 → 入库。写库阶段边写边刷新，能边扫边看
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      return listen<ScanProgress>("scan-progress", (e) => {
+        const p = e.payload;
+        if (p.phase === "done") { setScanProgress(null); return; }
+        setScanProgress(p);
+        if (p.phase === "write") {
+          const now = Date.now();
+          if (now - lastScanRefresh.current > 4000) {
+            lastScanRefresh.current = now;
+            reloadRef.current();
+          }
+        }
       });
     }).then((fn) => {
       if (cancelled) fn(); else unlisten = fn;
@@ -171,12 +209,23 @@ export default function App() {
   const doScan = async () => {
     if (!info) return;
     setScanning(true);
+    setScanProgress(null);
+    lastScanRefresh.current = 0;
     try {
       const report = await api.scan({ root: info.root, recursive: true, entry_limit: 60 });
-      notify(`扫描完成：新增 ${report.added} 条，更新 ${report.updated} 条，失效 ${report.missing} 条`);
+      notify(
+        `扫描完成：新增 ${report.added} 条，更新 ${report.updated} 条，失效 ${report.missing} 条` +
+        `（本次识别 ${report.probed ?? 0} 条，跳过 ${report.reused ?? 0} 条）`,
+      );
       await Promise.all([loadVideos(true), refreshMeta()]);
-    } catch (e) { notify(String(e)); } finally { setScanning(false); }
+    } catch (e) { notify(String(e)); } finally { setScanning(false); setScanProgress(null); }
   };
+
+  const scanLabel = !scanning
+    ? "扫描库"
+    : scanProgress
+      ? `${SCAN_PHASE[scanProgress.phase]} ${scanProgress.done}/${scanProgress.total}`
+      : "扫描中…";
 
   const selectOne = (video: VideoItem, ev: MouseEvent) => {
     setSelected((prev) => {
@@ -280,8 +329,8 @@ export default function App() {
               <select className="select" value={sort} onChange={(e) => setSort(e.target.value)} title="排序">
                 {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
               </select>
-              <button className="btn" onClick={doScan} disabled={scanning}>
-                <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanning ? "扫描中…" : "扫描库"}
+              <button className="btn" onClick={doScan} disabled={scanning} title="增量扫描：已登记且没变过的文件不会再跑 ffprobe">
+                <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanLabel}
               </button>
               <button className="btn" onClick={async () => {
                 try {

@@ -7,6 +7,7 @@ pub mod player;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,7 @@ pub struct AppState {
 impl AppState {
     fn new(app: &AppHandle) -> Self {
         let settings = read_settings(app);
+        media::set_tool_paths(settings.ffmpeg_path.as_deref(), settings.ffprobe_path.as_deref());
         let mut library = None;
         let mut startup_error = None;
         if let Some(root) = settings.library_root.as_ref() {
@@ -168,6 +170,7 @@ fn set_library(state: State<'_, AppState>, app: AppHandle, root: String) -> Resu
 #[tauri::command]
 fn update_settings(state: State<'_, AppState>, app: AppHandle, settings: Settings) -> Result<(), String> {
     let mut ctx = state.lock()?;
+    media::set_tool_paths(settings.ffmpeg_path.as_deref(), settings.ffprobe_path.as_deref());
     ctx.settings = settings;
     write_settings(&app, &ctx.settings)
 }
@@ -183,19 +186,69 @@ async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
     Ok(picked.map(|p| p.to_string()))
 }
 
+/// 并行 ffprobe：视频多的时候串行探测会让扫描拖到几分钟。
+/// 探测阶段完全不碰数据库锁，前端搜索/播放照常可用。
+fn probe_all(app: &AppHandle, paths: &[PathBuf]) -> Vec<db::VideoRecord> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 6)
+        .min(paths.len());
+    let total = paths.len();
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let bucket: Mutex<Vec<db::VideoRecord>> = Mutex::new(Vec::with_capacity(total));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = paths.get(i) else { break };
+                let rec = media::record_for_file(path);
+                if let Ok(mut b) = bucket.lock() {
+                    b.push(rec);
+                }
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if n % 20 == 0 || n == total {
+                    let _ = app.emit(
+                        "scan-progress",
+                        serde_json::json!({"phase":"probe","done":n,"total":total}),
+                    );
+                }
+            });
+        }
+    });
+    bucket.into_inner().unwrap_or_default()
+}
+
 /// 扫描库根目录：视频文件 + ZIP/CBZ 内的视频条目。
-/// 只登记元数据，抽帧交给单独的 contact_sheet 命令，避免扫描被 ffmpeg 拖慢。
+/// 分三步：走目录（不碰库）→ 并行探测（不持锁）→ 分批短锁写库。
+/// 已登记且文件没变的条目直接跳过 ffprobe，重复扫描几乎是瞬时的。
 #[tauri::command]
-async fn scan(state: State<'_, AppState>, opts: ScanOptions) -> Result<ScanReport, String> {
+async fn scan(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    opts: ScanOptions,
+) -> Result<ScanReport, String> {
     let state = state.inner().clone();
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = state.lock()?;
-        let lib = library(&guard)?;
-        let root = if opts.root.trim().is_empty() {
-            lib.root.clone()
-        } else {
-            PathBuf::from(&opts.root)
+        let (root, known) = {
+            let guard = state.lock()?;
+            let lib = library(&guard)?;
+            let root = if opts.root.trim().is_empty() {
+                lib.root.clone()
+            } else {
+                PathBuf::from(&opts.root)
+            };
+            (root, db::all_stamps(&lib.conn)?)
         };
+        if !root.is_dir() {
+            return Err(format!("目录不存在：{}", root.to_string_lossy()));
+        }
+
         let recursive = opts.recursive.unwrap_or(true);
         let entry_limit = opts.entry_limit.unwrap_or(60).clamp(1, 300);
         let max_depth = if recursive { 12 } else { 1 };
@@ -205,9 +258,14 @@ async fn scan(state: State<'_, AppState>, opts: ScanOptions) -> Result<ScanRepor
             updated: 0,
             missing: 0,
             skipped: 0,
+            probed: 0,
+            reused: 0,
             errors: Vec::new(),
         };
-        let mut seen: Vec<String> = Vec::new();
+
+        // 1) 只走文件系统
+        let mut videos: Vec<PathBuf> = Vec::new();
+        let mut archives: Vec<PathBuf> = Vec::new();
         for entry in WalkDir::new(&root)
             .max_depth(max_depth)
             .follow_links(false)
@@ -220,33 +278,101 @@ async fn scan(state: State<'_, AppState>, opts: ScanOptions) -> Result<ScanRepor
                 continue;
             }
             if media::is_video(path) {
-                report.found += 1;
-                seen.push(path.to_string_lossy().to_string());
-                let rec = media::record_for_file(path);
-                match db::upsert_video(&lib.conn, &rec) {
-                    Ok(true) => report.added += 1,
-                    Ok(false) => report.updated += 1,
-                    Err(e) => report.errors.push(format!("{}: {e}", path.to_string_lossy())),
-                }
+                videos.push(path.to_path_buf());
             } else if media::is_supported_archive(path) {
-                match media::archive_records(path, entry_limit) {
-                    Ok(recs) if !recs.is_empty() => {
-                        report.found += recs.len();
-                        seen.push(path.to_string_lossy().to_string());
-                        for rec in recs {
-                            match db::upsert_video(&lib.conn, &rec) {
-                                Ok(true) => report.added += 1,
-                                Ok(false) => report.updated += 1,
-                                Err(e) => report.errors.push(format!("{}: {e}", rec.path)),
-                            }
-                        }
-                    }
-                    Ok(_) => report.skipped += 1,
-                    Err(e) => report.errors.push(format!("{}: {e}", path.to_string_lossy())),
-                }
+                archives.push(path.to_path_buf());
             }
         }
-        report.missing = db::mark_missing(&lib.conn, &seen).unwrap_or(0);
+        let mut seen: Vec<String> = Vec::with_capacity(videos.len() + archives.len());
+        let _ = app.emit(
+            "scan-progress",
+            serde_json::json!({"phase":"walk","done":0,"total":videos.len() + archives.len()}),
+        );
+
+        // 2) 压缩包：大小/时间没变就不重读 Central Directory
+        let mut records: Vec<db::VideoRecord> = Vec::new();
+        let mut reused = 0usize;
+        for path in &archives {
+            let key_path = path.to_string_lossy().to_string();
+            let (size, mtime) = media::file_stamp(path);
+            seen.push(key_path.clone());
+            if let Some(st) = known.get(&(key_path, 0)) {
+                if st.size_bytes == size && st.mtime == mtime && st.entry_count > 0 {
+                    reused += 1;
+                    continue;
+                }
+            }
+            match media::archive_records(path, entry_limit) {
+                Ok(recs) if !recs.is_empty() => {
+                    report.found += recs.len();
+                    records.extend(recs);
+                }
+                Ok(_) => report.skipped += 1,
+                Err(e) => report.errors.push(format!("{}: {e}", path.to_string_lossy())),
+            }
+        }
+
+        // 3) 普通视频：没变过且元数据齐全 → 只登记 stub，省掉 ffprobe
+        let mut to_probe: Vec<PathBuf> = Vec::new();
+        for path in &videos {
+            report.found += 1;
+            let key_path = path.to_string_lossy().to_string();
+            let (size, mtime) = media::file_stamp(path);
+            seen.push(key_path.clone());
+            let fresh = known
+                .get(&(key_path, 0))
+                .is_some_and(|st| st.is_fresh(size, mtime));
+            if fresh {
+                records.push(media::record_stub(path));
+                reused += 1;
+            } else {
+                to_probe.push(path.clone());
+            }
+        }
+
+        // 4) 并行探测（无锁）
+        let probed = probe_all(&app, &to_probe);
+        report.probed = probed.len();
+        records.extend(probed);
+
+        // 5) 分批短锁落库，边写边报进度
+        let mut written = 0usize;
+        for chunk in records.chunks(64) {
+            {
+                let guard = state.lock()?;
+                let lib = library(&guard)?;
+                for rec in chunk {
+                    match db::upsert_video(&lib.conn, rec) {
+                        Ok(true) => report.added += 1,
+                        Ok(false) => report.updated += 1,
+                        Err(e) => report.errors.push(format!("{}: {e}", rec.path)),
+                    }
+                }
+            }
+            written += chunk.len();
+            let _ = app.emit(
+                "scan-progress",
+                serde_json::json!({
+                    "phase": "write",
+                    "done": written,
+                    "total": records.len(),
+                    "added": report.added,
+                    "updated": report.updated,
+                }),
+            );
+        }
+
+        // 6) 标记失效
+        {
+            let guard = state.lock()?;
+            let lib = library(&guard)?;
+            report.missing = db::mark_missing(&lib.conn, &seen).unwrap_or(0);
+        }
+        report.reused = reused;
+        let _ = app.emit(
+            "scan-progress",
+            serde_json::json!({"phase":"done","done":1,"total":1}),
+        );
         Ok(report)
     })
     .await

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use zip::ZipArchive;
@@ -54,8 +55,35 @@ pub fn is_supported_archive(path: &Path) -> bool {
         .is_some_and(|ext| ARCHIVE_EXT.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// 依次尝试：显式配置 → PATH → 本机已知目录（MESAVAGE Tools）。
+/// 设置页里手工指定的工具路径。edition 2024 下 set_var 是 unsafe，
+/// 所以用进程内单例保存，find_tool 优先查它。
+static TOOL_PATHS: OnceLock<Mutex<(Option<PathBuf>, Option<PathBuf>)>> = OnceLock::new();
+
+fn tool_paths() -> &'static Mutex<(Option<PathBuf>, Option<PathBuf>)> {
+    TOOL_PATHS.get_or_init(|| Mutex::new((None, None)))
+}
+
+/// 由设置页驱动：每次启动 / 保存设置时同步一次。
+pub fn set_tool_paths(ffmpeg: Option<&str>, ffprobe: Option<&str>) {
+    let pick = |s: Option<&str>| s.map(PathBuf::from).filter(|p| p.is_file());
+    let Ok(mut paths) = tool_paths().lock() else {
+        return;
+    };
+    paths.0 = pick(ffmpeg);
+    paths.1 = pick(ffprobe);
+}
+
+fn configured_tool(exe: &str) -> Option<PathBuf> {
+    let paths = tool_paths().lock().ok()?;
+    let slot = if exe == "ffmpeg" { &paths.0 } else { &paths.1 };
+    slot.clone()
+}
+
+/// 依次尝试：设置页指定 → 环境变量 → PATH → 本机已知目录（MESAVAGE Tools）。
 pub fn find_tool(exe: &str) -> Option<PathBuf> {
+    if let Some(p) = configured_tool(exe) {
+        return Some(p);
+    }
     let env_key = if exe == "ffmpeg" { "VIDEO_VAULT_FFMPEG" } else { "VIDEO_VAULT_FFPROBE" };
     if let Some(p) = std::env::var_os(env_key) {
         let p = PathBuf::from(p);
@@ -105,8 +133,8 @@ pub fn probe(path: &Path) -> MediaMeta {
         .args([
             "-v", "quiet",
             "-print_format", "json",
-            "-show_format",
-            "-show_streams",
+            // 只要这几个字段：整份 JSON 在字幕轨很多的文件上会大出几十倍，拖慢扫描
+            "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration",
             &path.to_string_lossy(),
         ])
         .output();
@@ -163,9 +191,15 @@ fn file_meta(path: &Path) -> (i64, i64) {
     }
 }
 
-pub fn record_for_file(path: &Path) -> VideoRecord {
+/// 只取大小与修改时间，用来判断文件是否变过（不探测内容）。
+pub fn file_stamp(path: &Path) -> (i64, i64) {
+    file_meta(path)
+}
+
+/// 只登记文件系统信息，不调用 ffprobe。
+/// 扫描时对「元数据已经齐全且文件没变」的条目用它，几千条也只是一次 stat。
+pub fn record_stub(path: &Path) -> VideoRecord {
     let (size_bytes, mtime) = file_meta(path);
-    let meta = probe(path);
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -181,14 +215,26 @@ pub fn record_for_file(path: &Path) -> VideoRecord {
         container,
         size_bytes,
         mtime,
-        duration_sec: meta.duration_sec,
-        width: meta.width,
-        height: meta.height,
-        codec_video: meta.codec_video,
-        codec_audio: meta.codec_audio,
+        duration_sec: 0.0,
+        width: 0,
+        height: 0,
+        codec_video: String::new(),
+        codec_audio: String::new(),
         entry_index: 0,
         entry_count: 1,
     }
+}
+
+/// 登记并探测。探测失败也不阻断入库（元数据留空，下次扫描再补）。
+pub fn record_for_file(path: &Path) -> VideoRecord {
+    let mut rec = record_stub(path);
+    let meta = probe(path);
+    rec.duration_sec = meta.duration_sec;
+    rec.width = meta.width;
+    rec.height = meta.height;
+    rec.codec_video = meta.codec_video;
+    rec.codec_audio = meta.codec_audio;
+    rec
 }
 
 /// 压缩包内的视频条目：登记为 (archive_path, entry_index) 的独立记录。

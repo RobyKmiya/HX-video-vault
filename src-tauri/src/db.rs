@@ -322,7 +322,53 @@ pub fn library_info(ctx: &LibraryContext) -> Result<LibraryInfo, String> {
     })
 }
 
+/// 扫描用：库内已登记条目的「轻量快照」，一次查全库，避免逐文件查库。
+#[derive(Debug, Clone, Copy)]
+pub struct VideoStamp {
+    pub size_bytes: i64,
+    pub mtime: i64,
+    /// 时长/分辨率是否已经探测过（压缩包条目通常为 false）
+    pub has_meta: bool,
+    pub entry_count: i64,
+}
+
+impl VideoStamp {
+    /// 文件没变且元数据齐全 → 这次扫描不必再跑 ffprobe。
+    pub fn is_fresh(&self, size_bytes: i64, mtime: i64) -> bool {
+        self.has_meta && self.size_bytes == size_bytes && self.mtime == mtime
+    }
+}
+
+pub fn all_stamps(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<(String, i64), VideoStamp>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path, entry_index, size_bytes, mtime, duration_sec, width, height, entry_count FROM videos")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, i64>(1)?),
+                VideoStamp {
+                    size_bytes: r.get(2)?,
+                    mtime: r.get(3)?,
+                    has_meta: r.get::<_, f64>(4)? > 0.0
+                        || (r.get::<_, i64>(5)? > 0 && r.get::<_, i64>(6)? > 0),
+                    entry_count: r.get(7)?,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (k, v) = row.map_err(|e| e.to_string())?;
+        out.insert(k, v);
+    }
+    Ok(out)
+}
+
 /// 按 (path, entry_index) 幂等登记；返回 true 表示新增。
+/// 新记录没带元数据时保留库内已有的元数据（扫描不会把探测结果抹掉）。
 pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String> {
     let exists: Option<i64> = conn
         .query_row(
@@ -335,7 +381,13 @@ pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String
     match exists {
         Some(id) => {
             conn.execute(
-                "UPDATE videos SET file_name=?2, container=?3, size_bytes=?4, mtime=?5, duration_sec=?6, width=?7, height=?8, codec_video=?9, codec_audio=?10, entry_count=?11, trashed=0 WHERE id=?1",
+                "UPDATE videos SET file_name=?2, container=?3, size_bytes=?4, mtime=?5,
+                    duration_sec = CASE WHEN ?6 > 0 THEN ?6 ELSE duration_sec END,
+                    width        = CASE WHEN ?7 > 0 THEN ?7 ELSE width END,
+                    height       = CASE WHEN ?8 > 0 THEN ?8 ELSE height END,
+                    codec_video  = CASE WHEN ?9 <> '' THEN ?9 ELSE codec_video END,
+                    codec_audio  = CASE WHEN ?10 <> '' THEN ?10 ELSE codec_audio END,
+                    entry_count=?11, trashed=0 WHERE id=?1",
                 params![id, rec.file_name, rec.container, rec.size_bytes, rec.mtime, rec.duration_sec, rec.width, rec.height, rec.codec_video, rec.codec_audio, rec.entry_count],
             ).map_err(|e| e.to_string())?;
             Ok(false)
@@ -996,6 +1048,48 @@ mod tests {
         let page = query_videos(&ctx.conn, &VideoQuery::default()).unwrap();
         assert_eq!(page.total, 2);
         assert_eq!(page.items[0].entry_count, 3);
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stamps_flag_unchanged_entries_and_upsert_keeps_meta() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("D:\\c.mp4", 0)).unwrap();
+        let id: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path=?1", params!["D:\\c.mp4"], |r| r.get(0))
+            .unwrap();
+
+        let stamps = all_stamps(&ctx.conn).unwrap();
+        let st = stamps.get(&("D:\\c.mp4".to_string(), 0)).expect("应有戳记");
+        assert!(st.is_fresh(1024, 100), "没变过且元数据齐全 → 不必再探测");
+        assert!(!st.is_fresh(2048, 100), "大小变了要重新探测");
+        assert!(!st.is_fresh(1024, 200), "mtime 变了要重新探测");
+
+        // 扫描时写回的 stub 没有元数据，不能把已有元数据抹掉
+        let mut stub = rec("D:\\c.mp4", 0);
+        stub.duration_sec = 0.0;
+        stub.width = 0;
+        stub.height = 0;
+        stub.codec_video = String::new();
+        stub.codec_audio = String::new();
+        stub.size_bytes = 2048;
+        assert!(!upsert_video(&ctx.conn, &stub).unwrap());
+        let after = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(after.duration_sec, 100.0);
+        assert_eq!(after.width, 1920);
+        assert_eq!(after.size_bytes, 2048);
+
+        // 从没探测过的条目 → has_meta=false，仍然需要探测
+        let mut bare = rec("D:\\d.mp4", 0);
+        bare.duration_sec = 0.0;
+        bare.width = 0;
+        bare.height = 0;
+        upsert_video(&ctx.conn, &bare).unwrap();
+        let stamps = all_stamps(&ctx.conn).unwrap();
+        assert!(!stamps[&("D:\\d.mp4".to_string(), 0)].is_fresh(1024, 100));
+
         drop(ctx);
         let _ = fs::remove_dir_all(root);
     }

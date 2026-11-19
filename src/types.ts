@@ -99,7 +99,20 @@ export interface ScanReport {
   updated: number;
   missing: number;
   skipped: number;
+  /** 本次真正调用 ffprobe 的条目数 */
+  probed?: number;
+  /** 因为文件没变而跳过的条目数 */
+  reused?: number;
   errors: string[];
+}
+
+/** 扫描进度事件（后端 emit "scan-progress"） */
+export interface ScanProgress {
+  phase: "walk" | "probe" | "write" | "done";
+  done: number;
+  total: number;
+  added?: number;
+  updated?: number;
 }
 
 export interface LibraryInfo {

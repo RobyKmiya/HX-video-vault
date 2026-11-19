@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { api } from "../api";
-import { formatBytes, formatDate, formatDuration, relativeTime } from "../format";
+import { formatBytes, formatDate, formatDuration, relativeTime, thumbRatio } from "../format";
 import type { Collection, Tag, VideoItem } from "../types";
 
 interface Props {
@@ -61,6 +61,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
   };
 
   const cover = video.contact_sheet ? convertFileSrc(video.contact_sheet) : "";
+  const coverRatio = thumbRatio(video.width, video.height);
   const watchedPercent = video.duration_sec > 0
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
@@ -72,7 +73,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
         <button className="icon-btn" onClick={onClose} title="关闭"><Icon name="x" size={18} /></button>
       </div>
       <div className="detail-scroll">
-        <div className="detail-cover" onClick={() => onPlay(video)}>
+        <div className="detail-cover" style={{ aspectRatio: coverRatio }} onClick={() => onPlay(video)}>
           {cover ? <img src={cover} alt="" /> : (
             <div className="detail-cover-empty"><Icon name="play" size={34} /><span>点击播放</span></div>
           )}

@@ -30,3 +30,14 @@ export function relativeTime(ts: number): string {
   if (delta < 86400 * 30) return `${Math.floor(delta / 86400)} 天前`;
   return formatDate(ts);
 }
+
+/**
+ * 缩略图容器的宽高比：跟随视频本身的画面比例，
+ * 这样竖屏视频不会被 16:9 的框裁掉上下大半。
+ * 元数据缺失时退回 16:9；极端比例做上下限收敛，避免卡片被拉得过长。
+ */
+export function thumbRatio(width: number, height: number): string {
+  if (!width || !height || width <= 0 || height <= 0) return "16 / 9";
+  const r = Math.min(2.4, Math.max(0.5, width / height));
+  return `${r.toFixed(4)}`;
+}

@@ -1,7 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MouseEvent } from "react";
 import { Icon } from "./Icons";
-import { formatBytes, formatDuration, relativeTime } from "../format";
+import { formatBytes, formatDuration, relativeTime, thumbRatio } from "../format";
 import type { VideoItem } from "../types";
 
 interface Props {
@@ -18,6 +18,8 @@ export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) 
     : 0;
   const cover = video.contact_sheet ? convertFileSrc(video.contact_sheet) : "";
   const isArchive = video.entry_index > 0;
+  const ratio = thumbRatio(video.width, video.height);
+  const portrait = video.width > 0 && video.height > video.width;
 
   return (
     <article
@@ -25,7 +27,7 @@ export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) 
       onClick={(e) => onSelect(video, e)}
       onDoubleClick={() => onOpen(video, false)}
     >
-      <div className="card-thumb" onClick={() => onOpen(video, false)}>
+      <div className={`card-thumb ${portrait ? "portrait" : ""}`} style={{ aspectRatio: ratio }} onClick={() => onOpen(video, false)}>
         {cover ? (
           <img src={cover} alt="" loading="lazy" />
         ) : (

@@ -218,25 +218,50 @@ fn run(cli: &Cli) -> Result<Value, String> {
         Command::Scan { root, entry_limit } => {
             let ctx = open(cli)?;
             let target = root.clone().unwrap_or_else(|| ctx.root.clone());
+            // 与 GUI 扫描一致：文件没变且元数据齐全的条目不再跑 ffprobe
+            let known = db::all_stamps(&ctx.conn)?;
             let mut found = 0usize;
             let mut added = 0usize;
             let mut updated = 0usize;
+            let mut probed = 0usize;
+            let mut reused = 0usize;
             let mut errors = Vec::new();
             let mut seen: Vec<String> = Vec::new();
             for entry in walkdir::WalkDir::new(&target).max_depth(12).into_iter().filter_map(Result::ok) {
                 let p = entry.path();
                 if !p.is_file() || p.to_string_lossy().contains(".vault") { continue; }
+                let key_path = p.to_string_lossy().to_string();
                 let recs = if media::is_video(p) {
-                    vec![media::record_for_file(p)]
+                    let (size, mtime) = media::file_stamp(p);
+                    let fresh = known
+                        .get(&(key_path.clone(), 0))
+                        .is_some_and(|st| st.is_fresh(size, mtime));
+                    if fresh {
+                        reused += 1;
+                        vec![media::record_stub(p)]
+                    } else {
+                        probed += 1;
+                        vec![media::record_for_file(p)]
+                    }
                 } else if media::is_supported_archive(p) {
-                    media::archive_records(p, *entry_limit).unwrap_or_else(|e| {
-                        errors.push(format!("{}: {e}", p.to_string_lossy()));
+                    let (size, mtime) = media::file_stamp(p);
+                    let unchanged = known
+                        .get(&(key_path.clone(), 0))
+                        .is_some_and(|st| st.size_bytes == size && st.mtime == mtime && st.entry_count > 0);
+                    if unchanged {
+                        reused += 1;
                         Vec::new()
-                    })
+                    } else {
+                        media::archive_records(p, *entry_limit).unwrap_or_else(|e| {
+                            errors.push(format!("{}: {e}", p.to_string_lossy()));
+                            Vec::new()
+                        })
+                    }
                 } else { Vec::new() };
-                if recs.is_empty() { continue; }
+                if p.is_file() && (media::is_video(p) || media::is_supported_archive(p)) {
+                    seen.push(key_path);
+                }
                 found += recs.len();
-                seen.push(p.to_string_lossy().to_string());
                 for rec in recs {
                     match db::upsert_video(&ctx.conn, &rec) {
                         Ok(true) => added += 1,
@@ -246,7 +271,8 @@ fn run(cli: &Cli) -> Result<Value, String> {
                 }
             }
             let missing = db::mark_missing(&ctx.conn, &seen)?;
-            Ok(json!({ "ok": true, "action": "scan", "found": found, "added": added, "updated": updated, "missing": missing, "errors": errors }))
+            Ok(json!({ "ok": true, "action": "scan", "found": found, "added": added, "updated": updated,
+                "probed": probed, "reused": reused, "missing": missing, "errors": errors }))
         }
         Command::Import { paths, entry_limit } => {
             let ctx = open(cli)?;
