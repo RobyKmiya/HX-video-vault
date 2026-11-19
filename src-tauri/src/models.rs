@@ -71,6 +71,10 @@ pub struct Collection {
     pub name: String,
     pub kind: String,
     pub count: i64,
+    /// 自定义分组（空串 = 未分组）
+    pub group_name: String,
+    /// 软删除时间戳，0 = 正常
+    pub deleted_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,4 +198,16 @@ pub struct SheetReport {
     pub done: usize,
     pub skipped: usize,
     pub failed: Vec<String>,
+    /// 被用户中途停掉（已生成的都已落库，下次接着跑）
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// 预览图任务现场（面板显示用）
+#[derive(Debug, Clone, Serialize)]
+pub struct SheetStatus {
+    pub running: bool,
+    pub total: i64,
+    pub done: i64,
+    pub pending: i64,
 }

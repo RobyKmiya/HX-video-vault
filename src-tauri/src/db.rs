@@ -9,7 +9,7 @@ use crate::models::{
     VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -116,7 +116,7 @@ fn map_video(row: &Row<'_>) -> rusqlite::Result<VideoItem> {
     })
 }
 
-const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, tag_text, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id) AS collections";
+const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, tag_text, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.deleted_at=0) AS collections";
 
 /// 打开（必要时创建）一个影匣库。库数据放在 <root>/.vault/vault.db，
 /// 与用户视频文件同盘但不混入媒体目录。
@@ -202,6 +202,9 @@ CREATE TABLE IF NOT EXISTS collections (
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'custom',
   created_at INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER NOT NULL DEFAULT 0,
+  group_name TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
   UNIQUE(name, kind)
 );
 CREATE TABLE IF NOT EXISTS collection_videos (
@@ -263,6 +266,23 @@ CREATE TABLE IF NOT EXISTS download_tasks (
         [],
     )
     .map_err(|e| e.to_string())?;
+    // v2 → v3：收藏集支持分组 / 软删除 / 手动排序
+    if version < 3 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(collections)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for (name, ddl) in [
+            ("deleted_at", "ALTER TABLE collections ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0"),
+            ("group_name", "ALTER TABLE collections ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"),
+            ("sort_order", "ALTER TABLE collections ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !cols.iter().any(|c| c == name) {
+                conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     if version < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| e.to_string())?;
@@ -436,7 +456,7 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         binds.push(Box::new(tag.to_string()));
     }
     if let Some(coll) = q.collection.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        where_parts.push("EXISTS (SELECT 1 FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.name=? )".into());
+        where_parts.push("EXISTS (SELECT 1 FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.name=? AND c.deleted_at=0 )".into());
         binds.push(Box::new(coll.to_string()));
     }
     let where_sql = where_parts.join(" AND ");
@@ -716,14 +736,16 @@ pub fn bulk_tag(
     Ok(changed)
 }
 
-pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.name, c.kind, COUNT(cv.video_id) AS cnt
-             FROM collections c LEFT JOIN collection_videos cv ON cv.collection_id=c.id
-             GROUP BY c.id ORDER BY c.kind='custom', c.name",
-        )
-        .map_err(|e| e.to_string())?;
+/// 列出目录。`include_deleted=true` 时把软删除的也带上（回收站视图用）。
+pub fn list_collections(conn: &Connection, include_deleted: bool) -> Result<Vec<Collection>, String> {
+    let where_sql = if include_deleted { "" } else { "WHERE c.deleted_at=0" };
+    let sql = format!(
+        "SELECT c.id, c.name, c.kind, COUNT(cv.video_id) AS cnt, c.group_name, c.deleted_at
+         FROM collections c LEFT JOIN collection_videos cv ON cv.collection_id=c.id
+         {where_sql}
+         GROUP BY c.id ORDER BY c.kind='custom', c.group_name, c.sort_order, c.id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
             Ok(Collection {
@@ -731,44 +753,161 @@ pub fn list_collections(conn: &Connection) -> Result<Vec<Collection>, String> {
                 name: r.get(1)?,
                 kind: r.get(2)?,
                 count: r.get(3)?,
+                group_name: r.get(4)?,
+                deleted_at: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-pub fn create_collection(conn: &Connection, name: &str) -> Result<(), String> {
+/// 新建目录。同名且已被软删除的，直接复活并挂到新分组，避免 UNIQUE 冲突后静默失败。
+pub fn create_collection(conn: &Connection, name: &str, group_name: &str) -> Result<i64, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("目录名不能为空".into());
+    }
+    let group_name = group_name.trim();
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT id, deleted_at FROM collections WHERE name=?1 AND kind='custom'",
+            params![name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some((id, deleted_at)) = existing {
+        if deleted_at > 0 {
+            conn.execute(
+                "UPDATE collections SET deleted_at=0, group_name=?2 WHERE id=?1",
+                params![id, group_name],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        return Ok(id);
+    }
     conn.execute(
-        "INSERT OR IGNORE INTO collections (name, kind, created_at) VALUES (?1, 'custom', ?2)",
-        params![name.trim(), now_secs()],
+        "INSERT INTO collections (name, kind, created_at, group_name) VALUES (?1, 'custom', ?2, ?3)",
+        params![name, now_secs(), group_name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn rename_collection(conn: &Connection, id: i64, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("目录名不能为空".into());
+    }
+    let kind: String = conn
+        .query_row("SELECT kind FROM collections WHERE id=?1", params![id], |r| r.get(0))
+        .map_err(|e| format!("目录不存在: {e}"))?;
+    if kind == "system" {
+        return Err("收藏 / 待看是内置目录，不能改名".into());
+    }
+    let dup: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM collections WHERE name=?1 AND kind='custom' AND id<>?2",
+            params![name, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if dup.is_some() {
+        return Err(format!("已经有同名目录「{name}」"));
+    }
+    conn.execute("UPDATE collections SET name=?2 WHERE id=?1", params![id, name])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn set_collection_group(conn: &Connection, id: i64, group_name: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE collections SET group_name=?2 WHERE id=?1",
+        params![id, group_name.trim()],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
 }
 
+/// 软删除：只标记，视频与目录的关联全部保留，可在回收站恢复。
+pub fn soft_delete_collection(conn: &Connection, id: i64) -> Result<(), String> {
+    let kind: String = conn
+        .query_row("SELECT kind FROM collections WHERE id=?1", params![id], |r| r.get(0))
+        .map_err(|e| format!("目录不存在: {e}"))?;
+    if kind == "system" {
+        return Err("收藏 / 待看是内置目录，不能删除".into());
+    }
+    conn.execute(
+        "UPDATE collections SET deleted_at=?2 WHERE id=?1",
+        params![id, now_secs()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn restore_collection(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("UPDATE collections SET deleted_at=0 WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 彻底删除（只在回收站里由用户确认后调用）。先清关联再删目录。
+pub fn purge_collection(conn: &Connection, id: i64) -> Result<(), String> {
+    let kind: String = conn
+        .query_row("SELECT kind FROM collections WHERE id=?1", params![id], |r| r.get(0))
+        .map_err(|e| format!("目录不存在: {e}"))?;
+    if kind == "system" {
+        return Err("收藏 / 待看是内置目录，不能删除".into());
+    }
+    conn.execute("DELETE FROM collection_videos WHERE collection_id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM collections WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn set_collection_video(
     conn: &Connection,
-    name: &str,
+    collection_id: i64,
     video_id: i64,
     add: bool,
 ) -> Result<(), String> {
-    let id: i64 = conn
-        .query_row("SELECT id FROM collections WHERE name=?1", params![name], |r| r.get(0))
-        .map_err(|e| format!("目录「{name}」不存在: {e}"))?;
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM collections WHERE id=?1 AND deleted_at=0",
+            params![collection_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if exists.is_none() {
+        return Err("目录不存在或已删除".into());
+    }
     if add {
         conn.execute(
             "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at) VALUES (?1,?2,?3)",
-            params![id, video_id, now_secs()],
+            params![collection_id, video_id, now_secs()],
         )
         .map_err(|e| e.to_string())?;
     } else {
         conn.execute(
             "DELETE FROM collection_videos WHERE collection_id=?1 AND video_id=?2",
-            params![id, video_id],
+            params![collection_id, video_id],
         )
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// 按名字取目录 id（内置「待看」这类固定入口用）。
+pub fn collection_id_by_name(conn: &Connection, name: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT id FROM collections WHERE name=?1 AND deleted_at=0",
+        params![name],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("目录「{name}」不存在: {e}"))
 }
 
 pub fn stats(conn: &Connection) -> Result<Stats, String> {
@@ -879,6 +1018,73 @@ pub fn ids_without_sheet(conn: &Connection, limit: usize) -> Result<Vec<i64>, St
         .query_map(params![limit as i64], |r| r.get::<_, i64>(0))
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// 全部未删除视频的 id（缺图的排前面，方便「先补没有的」）。
+pub fn all_video_ids_for_sheet(conn: &Connection, only_missing: bool) -> Result<Vec<i64>, String> {
+    let sql = if only_missing {
+        "SELECT id FROM videos WHERE trashed=0 AND contact_sheet='' ORDER BY added_at DESC"
+    } else {
+        "SELECT id FROM videos WHERE trashed=0 ORDER BY (contact_sheet='') DESC, added_at DESC"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// 预览图统计：(总数, 已有, 缺图)。
+pub fn sheet_counts(conn: &Connection) -> Result<(i64, i64, i64), String> {
+    conn.query_row(
+        "SELECT COUNT(*), SUM(CASE WHEN contact_sheet<>'' THEN 1 ELSE 0 END), SUM(CASE WHEN contact_sheet='' THEN 1 ELSE 0 END)
+         FROM videos WHERE trashed=0",
+        [],
+        |r| {
+            let total: i64 = r.get(0)?;
+            let done: Option<i64> = r.get(1)?;
+            let pending: Option<i64> = r.get(2)?;
+            Ok((total, done.unwrap_or(0), pending.unwrap_or(0)))
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 清空预览图记录，返回需要删除的图片路径。`ids=None` 表示全库。
+/// 只清库里的字段，物理文件交给调用方删（这样清库失败不会留下半截状态）。
+pub fn clear_contact_sheets(conn: &Connection, ids: Option<&[i64]>) -> Result<Vec<String>, String> {
+    let mut paths: Vec<String> = Vec::new();
+    match ids {
+        Some(list) => {
+            for id in list {
+                let p: Option<String> = conn
+                    .query_row("SELECT contact_sheet FROM videos WHERE id=?1", params![id], |r| r.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                if let Some(p) = p.filter(|s| !s.is_empty()) {
+                    paths.push(p);
+                }
+                conn.execute("UPDATE videos SET contact_sheet='' WHERE id=?1", params![id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        None => {
+            let mut stmt = conn
+                .prepare("SELECT contact_sheet FROM videos WHERE contact_sheet<>''")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for p in rows.filter_map(Result::ok) {
+                if !p.is_empty() {
+                    paths.push(p);
+                }
+            }
+            conn.execute("UPDATE videos SET contact_sheet='' WHERE contact_sheet<>''", [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(paths)
 }
 
 /// 标记扫描中已不存在的文件（不删除数据库记录，进「失效」状态由用户决定）。
@@ -1185,6 +1391,140 @@ mod tests {
 
         // 探测不到任何东西时不该写库
         assert!(!backfill_probe(&ctx.conn, id, 0.0, 0, 0, "", "").unwrap());
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 目录：分组、软删除、恢复、改名后关联不掉、彻底删除不动视频
+    #[test]
+    fn collections_support_group_soft_delete_and_restore() {
+        let (root, ctx) = temp_lib();
+        let id = create_collection(&ctx.conn, "  灵感  ", "创作").expect("建目录");
+        assert_eq!(collection_id_by_name(&ctx.conn, "灵感").unwrap(), id);
+
+        upsert_video(&ctx.conn, &rec("K:/a.mp4", 0)).unwrap();
+        let vid: i64 = ctx.conn.query_row("SELECT id FROM videos", [], |r| r.get(0)).unwrap();
+        set_collection_video(&ctx.conn, id, vid, true).unwrap();
+
+        let mine = list_collections(&ctx.conn, false).unwrap().into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(mine.group_name, "创作");
+        assert_eq!(mine.count, 1);
+
+        // 软删除：默认列表看不到，回收站看得到
+        soft_delete_collection(&ctx.conn, id).unwrap();
+        assert!(list_collections(&ctx.conn, false).unwrap().iter().all(|c| c.id != id));
+        assert!(list_collections(&ctx.conn, true).unwrap().iter().any(|c| c.id == id && c.deleted_at > 0));
+        assert!(get_video(&ctx.conn, vid).unwrap().collections.is_empty(), "已删目录不该出现在视频的目录里");
+
+        // 恢复后关联仍在
+        restore_collection(&ctx.conn, id).unwrap();
+        assert_eq!(get_video(&ctx.conn, vid).unwrap().collections, vec!["灵感".to_string()]);
+
+        // 内置目录受保护
+        let fav = collection_id_by_name(&ctx.conn, "收藏").unwrap();
+        assert!(soft_delete_collection(&ctx.conn, fav).is_err());
+        assert!(purge_collection(&ctx.conn, fav).is_err());
+
+        // 改名不影响关联（过滤/展示都按 id 走）
+        rename_collection(&ctx.conn, id, "灵感库").unwrap();
+        assert!(collection_id_by_name(&ctx.conn, "灵感").is_err());
+        assert_eq!(collection_id_by_name(&ctx.conn, "灵感库").unwrap(), id);
+        assert_eq!(get_video(&ctx.conn, vid).unwrap().collections, vec!["灵感库".to_string()]);
+
+        // 同名冲突要被挡住，不能悄悄建出第二条
+        create_collection(&ctx.conn, "另一个", "").unwrap();
+        assert!(rename_collection(&ctx.conn, id, "另一个").is_err());
+
+        // 彻底删除：目录没了，视频还在
+        purge_collection(&ctx.conn, id).unwrap();
+        assert!(list_collections(&ctx.conn, true).unwrap().iter().all(|c| c.id != id));
+        assert!(get_video(&ctx.conn, vid).is_ok());
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 同名目录软删后再「新建」应复活原记录，而不是被 UNIQUE 挡掉
+    #[test]
+    fn creating_same_name_after_delete_revives_it() {
+        let (root, ctx) = temp_lib();
+        let a = create_collection(&ctx.conn, "素材", "").unwrap();
+        soft_delete_collection(&ctx.conn, a).unwrap();
+        let b = create_collection(&ctx.conn, "素材", "整理后").unwrap();
+        assert_eq!(a, b);
+        let c = list_collections(&ctx.conn, false).unwrap().into_iter().find(|c| c.id == a).unwrap();
+        assert_eq!(c.group_name, "整理后");
+        assert_eq!(c.deleted_at, 0);
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 老库（user_version=2、collections 没有新列）打开时要自动补列，且数据不丢
+    #[test]
+    fn v2_library_gains_collection_columns_on_open() {
+        let root = std::env::temp_dir().join(format!(
+            "vv-mig-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let vault = LibraryContext::vault_dir(&root);
+        fs::create_dir_all(&vault).unwrap();
+        {
+            let conn = Connection::open(vault.join("vault.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE collections (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT NOT NULL,
+                   kind TEXT NOT NULL DEFAULT 'custom',
+                   created_at INTEGER NOT NULL DEFAULT 0,
+                   UNIQUE(name, kind));
+                 INSERT INTO collections (name, kind) VALUES ('旧目录', 'custom');
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+        let ctx = open_library(&root).expect("老库应能迁移");
+        let cols: Vec<String> = {
+            let mut stmt = ctx.conn.prepare("PRAGMA table_info(collections)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.filter_map(Result::ok).collect()
+        };
+        for want in ["deleted_at", "group_name", "sort_order"] {
+            assert!(cols.iter().any(|c| c == want), "迁移后缺少列 {want}");
+        }
+        let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let old = list_collections(&ctx.conn, false).unwrap();
+        assert!(old.iter().any(|c| c.name == "旧目录"), "迁移不能丢老目录");
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 预览图：统计、清空（返回待删路径）、只补缺图
+    #[test]
+    fn sheet_counts_and_clear_round_trip() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("K:/b.mp4", 0)).unwrap();
+        upsert_video(&ctx.conn, &rec("K:/c.mp4", 0)).unwrap();
+        let ids: Vec<i64> = {
+            let mut stmt = ctx.conn.prepare("SELECT id FROM videos ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+            rows.filter_map(Result::ok).collect()
+        };
+        set_contact_sheet(&ctx.conn, ids[0], "C:/tmp/sheet-1.jpg").unwrap();
+
+        assert_eq!(sheet_counts(&ctx.conn).unwrap(), (2, 1, 1));
+        assert_eq!(ids_without_sheet(&ctx.conn, 10).unwrap(), vec![ids[1]]);
+        assert_eq!(all_video_ids_for_sheet(&ctx.conn, true).unwrap(), vec![ids[1]]);
+        // 全量时缺图的排在前面
+        assert_eq!(all_video_ids_for_sheet(&ctx.conn, false).unwrap().first(), Some(&ids[1]));
+
+        let paths = clear_contact_sheets(&ctx.conn, None).unwrap();
+        assert_eq!(paths, vec!["C:/tmp/sheet-1.jpg".to_string()]);
+        assert_eq!(sheet_counts(&ctx.conn).unwrap(), (2, 0, 2));
+        assert_eq!(ids_without_sheet(&ctx.conn, 10).unwrap().len(), 2);
+
         drop(ctx);
         let _ = fs::remove_dir_all(root);
     }

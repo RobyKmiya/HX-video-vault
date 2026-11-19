@@ -213,7 +213,7 @@ fn run(cli: &Cli) -> Result<Value, String> {
         }
         Command::Collections => {
             let ctx = open(cli)?;
-            Ok(json!({ "ok": true, "collections": db::list_collections(&ctx.conn)? }))
+            Ok(json!({ "ok": true, "collections": db::list_collections(&ctx.conn, false)? }))
         }
         Command::Scan { root, entry_limit } => {
             let ctx = open(cli)?;

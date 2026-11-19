@@ -16,6 +16,8 @@ import type {
   PlaybackInfo,
   ScanProgress,
   Settings,
+  SheetProgress,
+  SheetStatus,
   Stats,
   Tag,
   VideoItem,
@@ -63,6 +65,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [videoPage, setVideoPage] = useState<VideoPage>(EMPTY_PAGE);
   const [tags, setTags] = useState<Tag[]>([]);
+  // 含软删除的目录，侧栏只显示未删除的，管理面板两边都要
   const [collections, setCollections] = useState<Collection[]>([]);
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
 
@@ -78,7 +81,10 @@ export default function App() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [sheetProgress, setSheetProgress] = useState<{ done: number; total: number } | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheet, setSheet] = useState<SheetStatus>({ running: false, total: 0, done: 0, pending: 0 });
+  const [sheetLive, setSheetLive] = useState<{ done: number; total: number; name?: string } | null>(null);
+  const [collectionsOpen, setCollectionsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const reloadRef = useRef<() => void>(() => {});
   const lastScanRefresh = useRef(0);
@@ -89,9 +95,15 @@ export default function App() {
   }, []);
 
   const refreshMeta = useCallback(async () => {
-    const [t, c, s] = await Promise.all([api.tags(), api.collections(), api.stats()]);
+    const [t, c, s] = await Promise.all([api.tags(), api.collections(true), api.stats()]);
     setTags(t); setCollections(c); setStats(s);
   }, []);
+
+  const refreshSheetStatus = useCallback(async () => {
+    try { setSheet(await api.sheetStatus()); } catch { /* 库未打开时忽略 */ }
+  }, []);
+
+  const activeCollections = useMemo(() => collections.filter((c) => c.deleted_at === 0), [collections]);
 
   const loadVideos = useCallback(async (reset = true) => {
     setLoading(true);
@@ -138,16 +150,22 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void import("@tauri-apps/api/event").then(({ listen }) => {
-      return listen("sheet-progress", (e) => {
-        const p = e.payload as { done: number; total: number };
-        setSheetProgress({ done: p.done, total: p.total });
-        if (p.done >= p.total) window.setTimeout(() => setSheetProgress(null), 1200);
+      return listen<SheetProgress>("sheet-progress", (e) => {
+        const p = e.payload;
+        if (p.finished) {
+          setSheetLive(null);
+          void refreshSheetStatus();
+          void refreshMeta();
+          reloadRef.current();
+          return;
+        }
+        setSheetLive({ done: p.done, total: p.total, name: p.name });
       });
     }).then((fn) => {
       if (cancelled) fn(); else unlisten = fn;
     }).catch(() => {});
     return () => { cancelled = true; unlisten?.(); };
-  }, []);
+  }, [refreshMeta, refreshSheetStatus]);
 
   // 扫描进度：清点 → 识别 → 入库。写库阶段边写边刷新，能边扫边看
   useEffect(() => {
@@ -173,6 +191,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!ready || !info) return;
+    void refreshSheetStatus();
+  }, [ready, info, refreshSheetStatus]);
+
+  useEffect(() => {
+    if (activeCollection && !activeCollections.some((c) => c.name === activeCollection)) {
+      setActiveCollection(null);
+    }
+  }, [activeCollections, activeCollection]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
@@ -188,22 +217,41 @@ export default function App() {
     [videoPage.items, detailId],
   );
 
-  const openPlayer = async (video: VideoItem) => {
+  // 打开播放统一走这里：先试 mpv（支持字幕/倍速/IPC），拿不到就退回内置。
+  // 首次打开与「上一条/下一条」共用同一条路径，避免翻页时上一集的 mpv 窗口留在屏幕上。
+  const openById = useCallback(async (id: number) => {
     try {
-      // mpv 可用时优先用它（支持字幕/倍速/进度 IPC 回传）
-      const took = await api.mpvOpen(video.id).catch(() => false);
-      const result = await api.playback(video.id);
+      const took = await api.mpvOpen(id).catch(() => false);
+      if (!took) void api.mpvClose().catch(() => {});
+      const result = await api.playback(id);
       setPlayer({ ...result, source: took ? "mpv" : result.source });
       await refreshMeta();
     } catch (e) { notify(String(e)); }
-  };
+  }, [notify, refreshMeta]);
 
-  const movePlayer = (delta: number) => {
+  const openPlayer = (video: VideoItem) => { void openById(video.id); };
+
+  const movePlayer = async (delta: number) => {
     const items = videoPage.items;
     const idx = items.findIndex((v) => v.id === player?.video.id);
+    if (idx < 0) { notify("当前视频不在当前列表里，返回列表再进"); return; }
     const next = items[idx + delta];
-    if (!next) { notify(delta > 0 ? "已经是最后一条" : "已经是第一条"); return; }
-    void api.playback(next.id).then(setPlayer).catch((e) => notify(String(e)));
+    if (next) { await openById(next.id); return; }
+    // 到了当前已加载的尾部：先把下一页取回来，再往后翻，不用退回列表手动加载
+    if (delta > 0 && items.length < videoPage.total) {
+      try {
+        const more = await api.query({
+          view, search: debouncedSearch || undefined, tag: activeTag ?? undefined,
+          collection: activeCollection ?? undefined, sort, page: videoPage.page + 1, page_size: 48,
+        });
+        const merged = [...items, ...more.items];
+        setVideoPage({ ...more, items: merged });
+        setPage(more.page);
+        const candidate = merged[idx + delta];
+        if (candidate) { await openById(candidate.id); return; }
+      } catch (e) { notify(String(e)); return; }
+    }
+    notify(delta > 0 ? "已经是最后一条" : "已经是第一条");
   };
 
   const doScan = async () => {
@@ -219,6 +267,27 @@ export default function App() {
       );
       await Promise.all([loadVideos(true), refreshMeta()]);
     } catch (e) { notify(String(e)); } finally { setScanning(false); setScanProgress(null); }
+  };
+
+  const startSheets = async (all: boolean) => {
+    try {
+      const r = await api.contactSheets(null, undefined, all);
+      notify(
+        `预览图：成功 ${r.done} / ${r.total}` +
+        (r.cancelled ? "（已暂停，下次接着来）" : "") +
+        (r.failed.length ? `，失败 ${r.failed.length} 条` : ""),
+      );
+      await Promise.all([loadVideos(true), refreshMeta()]);
+      await refreshSheetStatus();
+    } catch (e) { notify(String(e)); }
+  };
+
+  const clearSheets = async () => {
+    try {
+      const n = await api.clearContactSheets(null);
+      notify(`已清空 ${n} 张预览图，可以重新生成`);
+      await Promise.all([loadVideos(true), refreshSheetStatus()]);
+    } catch (e) { notify(String(e)); }
   };
 
   const scanLabel = !scanning
@@ -289,9 +358,11 @@ export default function App() {
         tags={tags}
         activeTag={activeTag}
         onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
-        collections={collections}
+        collections={activeCollections}
         activeCollection={activeCollection}
         onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
+        onCreateCollection={() => setCollectionsOpen(true)}
+        onManageCollections={() => setCollectionsOpen(true)}
         onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); }}
         onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); }}
         onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); }}
@@ -305,10 +376,7 @@ export default function App() {
         {showPanel ? (
           statsOpen ? <StatsPanel stats={stats} onClose={() => setStatsOpen(false)} onOpenVideo={(id) => {
             setStatsOpen(false);
-            void api.playback(id).then((p) => {
-              setPlayer(p);
-              void loadVideos(true);
-            }).catch((e) => notify(String(e)));
+            void openById(id);
           }} />
             : downloadOpen ? <DownloadPanel tags={tags} onClose={() => setDownloadOpen(false)}
                 onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
@@ -332,15 +400,9 @@ export default function App() {
               <button className="btn" onClick={doScan} disabled={scanning} title="增量扫描：已登记且没变过的文件不会再跑 ffprobe">
                 <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanLabel}
               </button>
-              <button className="btn" onClick={async () => {
-                try {
-                  const r = await api.contactSheets(null, 40);
-                  notify(`预览图：完成 ${r.done}，跳过 ${r.skipped}，失败 ${r.failed.length}`);
-                  await Promise.all([loadVideos(true), refreshMeta()]);
-                } catch (e) { notify(String(e)); }
-              }} disabled={!!sheetProgress} title="为最近入库、尚无预览图的视频批量抽帧">
-                <Icon name="camera" size={16} />
-                {sheetProgress ? `${sheetProgress.done}/${sheetProgress.total}` : "批量预览"}
+              <button className="btn" onClick={() => { setSheetOpen(true); void refreshSheetStatus(); }} title="批量生成预览图：可暂停、可续跑、可清空重建">
+                <Icon name="camera" size={16} className={sheet.running ? "spin" : ""} />
+                {sheetLive ? `${sheetLive.done}/${sheetLive.total}` : sheet.pending > 0 ? `预览图 缺 ${sheet.pending}` : "预览图"}
               </button>
               <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="设置"><Icon name="settings" size={18} /></button>
             </header>
@@ -366,10 +428,25 @@ export default function App() {
                 <button className="btn small" onClick={() => setBulkTagOpen((v) => !v)}><Icon name="tag" size={14} />批量打标</button>
                 <button className="btn small" onClick={async () => {
                   try {
-                    await api.setCollection("待看", [...selected][0], true);
-                    notify("已加入待看清单"); await refreshMeta();
+                    const ids = [...selected];
+                    for (const id of ids) await api.setCollection("待看", id, true);
+                    notify(`已把 ${ids.length} 条加入待看`); await refreshMeta();
                   } catch (e) { notify(String(e)); }
                 }}><Icon name="list" size={14} />加入待看</button>
+                <select className="select small-select" value="" onChange={async (e) => {
+                  const id = Number(e.target.value);
+                  if (!id) return;
+                  try {
+                    const ids = [...selected];
+                    for (const v of ids) await api.setCollection(id, v, true);
+                    notify(`已把 ${ids.length} 条加入该目录`);
+                    await Promise.all([refreshMeta(), loadVideos(true)]);
+                  } catch (err) { notify(String(err)); }
+                  e.target.value = "";
+                }} title="批量加入目录">
+                  <option value="">加入目录…</option>
+                  {activeCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
                 <button className="btn small" onClick={() => setSelected(new Set())}>取消选择</button>
                 {bulkTagOpen && (
                   <div className="bulk-tags">
@@ -428,7 +505,7 @@ export default function App() {
         <DetailDrawer
           video={detail}
           tags={tags}
-          collections={collections}
+          collections={activeCollections}
           onClose={() => setDetailId(null)}
           onPlay={(v) => void openPlayer(v)}
           onChanged={() => { void refreshMeta(); void loadVideos(true); }}
@@ -449,6 +526,31 @@ export default function App() {
       {settingsOpen && (
         <SettingsModal settings={settings} setSettings={setSettings} onClose={() => setSettingsOpen(false)} notify={notify} />
       )}
+
+      {sheetOpen && (
+        <SheetPanel
+          status={sheet}
+          live={sheetLive}
+          onStart={startSheets}
+          onCancel={async () => {
+            try { await api.cancelContactSheets(); notify("已请求暂停：当前这一条抽完就停，已生成的都保留"); }
+            catch (e) { notify(String(e)); }
+          }}
+          onClear={() => void clearSheets()}
+          onClose={() => { setSheetOpen(false); void refreshSheetStatus(); }}
+          notify={notify}
+        />
+      )}
+
+      {collectionsOpen && (
+        <CollectionManager
+          items={collections}
+          onChanged={() => { void refreshMeta(); void loadVideos(true); }}
+          onClose={() => setCollectionsOpen(false)}
+          notify={notify}
+        />
+      )}
+
       {toast && <div className="toast"><Icon name="info" size={15} />{toast}</div>}
     </div>
   );
@@ -516,6 +618,231 @@ function SettingsModal({
         <div className="modal-actions">
           <button className="btn" onClick={onClose}>取消</button>
           <button className="btn primary" onClick={() => void save()}>保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 预览图任务面板：全量生成 / 暂停 / 续跑 / 清空重建 */
+function SheetPanel({
+  status, live, onStart, onCancel, onClear, onClose, notify,
+}: {
+  status: SheetStatus;
+  live: { done: number; total: number; name?: string } | null;
+  onStart: (all: boolean) => Promise<void>;
+  onCancel: () => Promise<void>;
+  onClear: () => void;
+  onClose: () => void;
+  notify: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState<null | "missing" | "all">(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const running = busy !== null || !!live || status.running;
+  const total = live?.total ?? status.total;
+  const finished = live?.done ?? Math.max(0, status.total - status.pending);
+  const pct = total ? Math.min(100, (finished / total) * 100) : 0;
+
+  const run = async (all: boolean) => {
+    setBusy(all ? "all" : "missing");
+    try { await onStart(all); } finally { setBusy(null); setConfirmClear(false); }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal sheet-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="panel-head">
+          <div><h1>预览图</h1><p>ffmpeg 抽 4×4 帧，结果存在库的 .vault/cache 里</p></div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="sheet-stats">
+            <div><b>{status.total.toLocaleString()}</b><span>总视频</span></div>
+            <div><b>{status.done.toLocaleString()}</b><span>已有预览图</span></div>
+            <div><b>{status.pending.toLocaleString()}</b><span>还缺</span></div>
+          </div>
+
+          <div className="sheet-progress">
+            <div className="bar"><span style={{ width: `${pct}%` }} /></div>
+            <div className="sheet-progress-line">
+              <span>{running ? `正在生成 ${finished}/${total}` : `进度 ${finished}/${total}`}</span>
+              <span className="muted truncate">{live?.name ?? ""}</span>
+            </div>
+          </div>
+
+          <div className="sheet-actions">
+            <button className="btn primary" disabled={running || status.pending === 0} onClick={() => void run(false)}>
+              {busy === "missing" ? "生成中…" : `补齐缺图（${status.pending}）`}
+            </button>
+            <button className="btn" disabled={running} onClick={() => void run(true)} title="已有的也重抽一遍，慎用">
+              全部重做（{status.total}）
+            </button>
+            <button className="btn" disabled={!running} onClick={() => void onCancel()}>
+              暂停
+            </button>
+            <button
+              className="btn danger"
+              disabled={running || status.done === 0}
+              onClick={() => {
+                if (!confirmClear) { setConfirmClear(true); notify("再点一次「确认清空」才会删掉已生成的预览图"); return; }
+                setConfirmClear(false);
+                onClear();
+              }}
+            >
+              {confirmClear ? "确认清空" : "清空重建"}
+            </button>
+          </div>
+
+          <p className="hint">
+            可以随时关掉这个窗口，甚至退出影匣：每条抽完立刻入库，已完成的不丢。
+            下次进来点「补齐缺图」就从剩下的继续。清空重建只删预览图，不动视频文件。
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 目录管理：新建 / 改名 / 分组 / 软删除 / 恢复 / 彻底删除 */
+function CollectionManager({
+  items, onChanged, onClose, notify,
+}: {
+  items: Collection[];
+  onChanged: () => void;
+  onClose: () => void;
+  notify: (m: string) => void;
+}) {
+  const [tab, setTab] = useState<"active" | "trash">("active");
+  const [newName, setNewName] = useState("");
+  const [newGroup, setNewGroup] = useState("");
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftGroup, setDraftGroup] = useState("");
+  const [confirmPurge, setConfirmPurge] = useState<number | null>(null);
+
+  const active = items.filter((c) => c.deleted_at === 0);
+  const trashed = items.filter((c) => c.deleted_at > 0);
+  const groups = [...new Set(active.map((c) => c.group_name).filter(Boolean))];
+
+  const create = async () => {
+    if (!newName.trim()) { notify("先给目录起个名字"); return; }
+    try {
+      await api.createCollection(newName, newGroup);
+      setNewName("");
+      onChanged();
+      notify(`目录「${newName.trim()}」已就绪`);
+    } catch (e) { notify(String(e)); }
+  };
+
+  const saveEdit = async (id: number) => {
+    try {
+      await api.renameCollection(id, draftName);
+      await api.setCollectionGroup(id, draftGroup);
+      setEditing(null);
+      onChanged();
+      notify("已保存");
+    } catch (e) { notify(String(e)); }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal collection-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="panel-head">
+          <div><h1>目录管理</h1><p>自定义收藏夹：可改名、可分组、删除进回收站</p></div>
+          <button className="icon-btn" onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+
+        <div className="modal-tabs">
+          <button className={tab === "active" ? "on" : ""} onClick={() => setTab("active")}>目录（{active.length}）</button>
+          <button className={tab === "trash" ? "on" : ""} onClick={() => setTab("trash")}>回收站（{trashed.length}）</button>
+        </div>
+
+        <div className="modal-body">
+          {tab === "active" ? (
+            <>
+              <div className="collection-new">
+                <input value={newName} placeholder="新目录名" onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void create(); }} />
+                <input value={newGroup} placeholder="分组（可空）" list="vv-collection-groups"
+                  onChange={(e) => setNewGroup(e.target.value)} />
+                <datalist id="vv-collection-groups">
+                  {groups.map((g) => <option key={g} value={g} />)}
+                </datalist>
+                <button className="btn primary" onClick={() => void create()}>新建</button>
+              </div>
+
+              <div className="collection-list">
+                {active.map((c) => {
+                  const isSystem = c.kind === "system";
+                  const isEditing = editing === c.id;
+                  return (
+                    <div key={c.id} className="collection-row">
+                      {isEditing ? (
+                        <>
+                          <input className="collection-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} autoFocus />
+                          <input className="collection-input" value={draftGroup} placeholder="分组" list="vv-collection-groups"
+                            onChange={(e) => setDraftGroup(e.target.value)} />
+                          <button className="btn small primary" onClick={() => void saveEdit(c.id)}>保存</button>
+                          <button className="btn small" onClick={() => setEditing(null)}>取消</button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="collection-name">
+                            <Icon name="folder" size={15} />
+                            <span className="truncate">{c.name}</span>
+                            {c.group_name && <span className="group-chip">{c.group_name}</span>}
+                            {isSystem && <span className="muted small">内置</span>}
+                          </span>
+                          <span className="nav-count">{c.count}</span>
+                          <button className="btn small" disabled={isSystem}
+                            onClick={() => { setEditing(c.id); setDraftName(c.name); setDraftGroup(c.group_name); }}>
+                            改名 / 分组
+                          </button>
+                          <button className="btn small danger" disabled={isSystem}
+                            onClick={async () => {
+                              try { await api.deleteCollection(c.id); onChanged(); notify(`「${c.name}」已移入回收站`); }
+                              catch (e) { notify(String(e)); }
+                            }}>
+                            删除
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+                {active.length === 0 && <div className="nav-empty">还没有自定义目录</div>}
+              </div>
+            </>
+          ) : (
+            <div className="collection-list">
+              {trashed.map((c) => (
+                <div key={c.id} className="collection-row">
+                  <span className="collection-name">
+                    <Icon name="trash" size={15} />
+                    <span className="truncate">{c.name}</span>
+                    {c.group_name && <span className="group-chip">{c.group_name}</span>}
+                    <span className="muted small">{c.count} 条</span>
+                  </span>
+                  <button className="btn small" onClick={async () => {
+                    try { await api.restoreCollection(c.id); onChanged(); notify(`「${c.name}」已恢复`); }
+                    catch (e) { notify(String(e)); }
+                  }}>恢复</button>
+                  <button className={`btn small ${confirmPurge === c.id ? "danger" : ""}`}
+                    onClick={async () => {
+                      if (confirmPurge !== c.id) { setConfirmPurge(c.id); notify("再点一次才会彻底删除目录（视频本身不受影响）"); return; }
+                      setConfirmPurge(null);
+                      try { await api.deleteCollection(c.id, true); onChanged(); notify(`「${c.name}」已彻底删除`); }
+                      catch (e) { notify(String(e)); }
+                    }}>
+                    {confirmPurge === c.id ? "确认彻底删除" : "彻底删除"}
+                  </button>
+                </div>
+              ))}
+              {trashed.length === 0 && <div className="nav-empty">回收站是空的</div>}
+            </div>
+          )}
+
+          <p className="hint">删除目录只是把目录放进回收站，视频文件和在库里的记录都不受影响。</p>
         </div>
       </div>
     </div>

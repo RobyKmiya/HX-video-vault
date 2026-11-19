@@ -73,6 +73,8 @@ export interface Collection {
   name: string;
   kind: string;
   count: number;
+  group_name: string;
+  deleted_at: number;
 }
 
 export interface DayCount {
@@ -181,6 +183,25 @@ export interface SheetReport {
   done: number;
   skipped: number;
   failed: string[];
+  cancelled: boolean;
+}
+
+/** 预览图任务现场 */
+export interface SheetStatus {
+  running: boolean;
+  total: number;
+  done: number;
+  pending: number;
+}
+
+/** 预览图进度事件 */
+export interface SheetProgress {
+  done: number;
+  total: number;
+  id: number;
+  name?: string;
+  finished?: boolean;
+  cancelled?: boolean;
 }
 
 export interface PlaybackInfo {

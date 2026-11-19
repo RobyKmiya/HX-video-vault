@@ -9,6 +9,7 @@ import type {
   ScanReport,
   Settings,
   SheetReport,
+  SheetStatus,
   WatchRecord,
   Stats,
   Tag,
@@ -48,16 +49,26 @@ export const api = {
     invoke<void>("update_tag", { id, name, category, weight }),
   bulkTag: (videoIds: number[], tagIds: number[], add: boolean) =>
     invoke<number>("bulk_tag", { videoIds, tagIds, add }),
-  collections: () => invoke<Collection[]>("list_collections"),
-  createCollection: (name: string) => invoke<void>("create_collection", { name }),
-  setCollection: (name: string, videoId: number, add: boolean) =>
-    invoke<void>("set_collection_video", { name, videoId, add }),
+  collections: (includeDeleted = false) => invoke<Collection[]>("list_collections", { includeDeleted }),
+  createCollection: (name: string, group = "") => invoke<number>("create_collection", { name, group }),
+  renameCollection: (id: number, name: string) => invoke<void>("rename_collection", { id, name }),
+  setCollectionGroup: (id: number, group: string) => invoke<void>("set_collection_group", { id, group }),
+  deleteCollection: (id: number, purge = false) => invoke<void>("delete_collection", { id, purge }),
+  restoreCollection: (id: number) => invoke<void>("restore_collection", { id }),
+  /** 目录 id 或名字都能用（详情页拿 id，旧调用点写名字） */
+  setCollection: (target: number | string, videoId: number, add: boolean) =>
+    typeof target === "number"
+      ? invoke<void>("set_collection_video", { collectionId: target, videoId, add })
+      : invoke<void>("set_collection_video", { name: target, videoId, add }),
   stats: () => invoke<Stats>("stats"),
   playback: (id: number) => invoke<PlaybackInfo>("playback_info", { id }),
   playExternal: (id: number) => invoke<string>("play_external", { id }),
   contactSheet: (id: number) => invoke<string>("make_contact_sheet", { id }),
-  contactSheets: (ids: number[] | null, limit?: number) =>
-    invoke<SheetReport>("make_contact_sheets", { ids, limit }),
+  contactSheets: (ids: number[] | null, limit?: number, all = false) =>
+    invoke<SheetReport>("make_contact_sheets", { ids, limit, all }),
+  cancelContactSheets: () => invoke<void>("cancel_contact_sheets"),
+  clearContactSheets: (ids?: number[] | null) => invoke<number>("clear_contact_sheets", { ids: ids ?? null }),
+  sheetStatus: () => invoke<SheetStatus>("sheet_status"),
   watchHistory: (limit?: number) => invoke<WatchRecord[]>("watch_history", { limit }),
   engines: () => invoke<EngineInfo[]>("player_engines"),
   mpvOpen: (id: number, wid?: string) => invoke<boolean>("mpv_open", { id, wid }),

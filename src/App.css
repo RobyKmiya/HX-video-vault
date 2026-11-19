@@ -345,3 +345,59 @@ h1, h2, h3, p { margin: 0; }
   .detail-drawer { width: 340px; }
   .main { padding: 0 18px 50px; }
 }
+
+/* ---------- player: 比例与弹层 ---------- */
+.player-viewport { position: relative; width: 100%; height: 100%; display: grid; place-items: center; overflow: hidden; }
+.player-stage video { background: #000; display: block; }
+.player-pop-anchor { position: relative; display: flex; }
+.player-round.on { background: rgba(255,255,255,.3); }
+.player-round:disabled { opacity: .45; }
+.player-pop {
+  position: absolute; bottom: 48px; left: 50%; transform: translateX(-50%);
+  min-width: 236px; background: #171b24; border: 1px solid rgba(255,255,255,.12);
+  border-radius: 12px; padding: 8px; box-shadow: 0 18px 40px rgba(0,0,0,.45); z-index: 5;
+}
+.player-pop-title { font-size: 11px; color: #8b95a7; padding: 6px 10px 8px; letter-spacing: .06em; }
+.player-pop-item { display: flex; justify-content: space-between; gap: 12px; width: 100%; background: none; border: 0; color: #dbe2ee; font-size: 12.5px; padding: 8px 10px; border-radius: 8px; text-align: left; }
+.player-pop-item:hover { background: rgba(255,255,255,.08); }
+.player-pop-item.on { background: rgba(255,255,255,.16); color: #fff; }
+.player-pop-item .muted { color: #8b95a7; font-size: 11px; }
+.player-pop-settings { width: 268px; }
+.player-pop-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-size: 12.5px; color: #dbe2ee; }
+.player-pop-row input[type="checkbox"] { accent-color: var(--accent); }
+.player-pop-row span { flex: 1; }
+.player-pop-row select { background: #10141c; color: #dbe2ee; border: 1px solid rgba(255,255,255,.15); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+.player-pop-hint { font-size: 11px; color: #7d8798; padding: 6px 10px 2px; line-height: 1.5; }
+
+/* ---------- sidebar: 目录分组 ---------- */
+.caption-actions { display: flex; gap: 4px; }
+.tag-group-head.static { cursor: default; }
+.group-chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); flex: 0 0 auto; }
+.small-select { height: 28px; padding: 0 8px; font-size: 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); }
+
+/* ---------- 预览图任务面板 ---------- */
+.sheet-modal { width: min(520px, 92vw); }
+.sheet-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.sheet-stats > div { background: var(--surface-2); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+.sheet-stats b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.sheet-stats span { font-size: 11px; color: var(--muted); }
+.sheet-progress .bar { height: 7px; }
+.sheet-progress-line { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; margin-top: 8px; }
+.sheet-progress-line .truncate { max-width: 60%; }
+.sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ---------- 目录管理 ---------- */
+.collection-modal { width: min(660px, 94vw); }
+.modal-tabs { display: flex; gap: 6px; padding: 0 24px; border-bottom: 1px solid var(--line); }
+.modal-tabs button { border: 0; background: none; padding: 10px 4px; font-size: 13px; color: var(--muted); border-bottom: 2px solid transparent; }
+.modal-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.collection-new { display: flex; gap: 8px; }
+.collection-new input { flex: 1; height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; outline: none; }
+.collection-new input:focus { border-color: var(--accent); }
+.collection-list { display: flex; flex-direction: column; }
+.collection-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.collection-row:last-child { border-bottom: 0; }
+.collection-name { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.collection-input { height: 32px; border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; flex: 1; min-width: 0; }
+.btn.danger { color: var(--danger); border-color: rgba(224,79,95,.35); }
+.btn.danger:hover { background: rgba(224,79,95,.08); }

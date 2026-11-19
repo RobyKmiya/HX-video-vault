@@ -23,6 +23,8 @@ interface Props {
   collections: Collection[];
   activeCollection: string | null;
   onCollection: (c: string | null) => void;
+  onCreateCollection: () => void;
+  onManageCollections: () => void;
   onStats: () => void;
   onTags: () => void;
   onDownload: () => void;
@@ -43,6 +45,19 @@ export function Sidebar(props: Props) {
   const sorted = [...groups.entries()].sort(([a], [b]) => {
     if (a === "未分类") return -1;
     if (b === "未分类") return 1;
+    return a.localeCompare(b, "zh-CN");
+  });
+
+  // 目录按分组归拢：有分组的按名字排，未分组的放最后
+  const byGroup = new Map<string, Collection[]>();
+  for (const c of props.collections.filter((x) => x.kind === "custom")) {
+    const key = c.group_name || "";
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key)!.push(c);
+  }
+  const collectionGroups = [...byGroup.entries()].sort(([a], [b]) => {
+    if (!a) return 1;
+    if (!b) return -1;
     return a.localeCompare(b, "zh-CN");
   });
 
@@ -114,17 +129,39 @@ export function Sidebar(props: Props) {
 
       {props.collections.length > 0 && (
         <nav className="nav-group nav-short">
-          <div className="nav-caption">目录</div>
-          {props.collections.filter((c) => c.kind === "custom").map((c) => (
-            <button
-              key={c.id}
-              className={`nav-item nav-item-sm ${props.activeCollection === c.name ? "active" : ""}`}
-              onClick={() => props.onCollection(c.name)}
-            >
-              <Icon name="folder" size={15} />
-              <span className="truncate">{c.name}</span>
-              <span className="nav-count">{c.count}</span>
-            </button>
+          <div className="nav-caption nav-caption-row">
+            <span>目录</span>
+            <span className="caption-actions">
+              <button className="caption-action" onClick={props.onCreateCollection} title="新建目录">
+                <Icon name="plus" size={14} />
+              </button>
+              <button className="caption-action" onClick={props.onManageCollections} title="管理目录">
+                <Icon name="settings" size={14} />
+              </button>
+            </span>
+          </div>
+          {collectionGroups.map(([group, list]) => (
+            <div key={group || "__none"} className="tag-group">
+              {group && (
+                <div className="tag-group-head static">
+                  <Icon name="folder" size={12} />
+                  <span>{group}</span>
+                  <span className="tag-group-count">{list.length}</span>
+                </div>
+              )}
+              {list.map((c) => (
+                <button
+                  key={c.id}
+                  className={`nav-item nav-item-sm ${props.activeCollection === c.name ? "active" : ""}`}
+                  onClick={() => props.onCollection(c.name)}
+                  title={c.group_name ? `${c.group_name} / ${c.name} · ${c.count} 条` : `${c.name} · ${c.count} 条`}
+                >
+                  <Icon name="folder" size={15} />
+                  <span className="truncate">{c.name}</span>
+                  <span className="nav-count">{c.count}</span>
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
       )}
