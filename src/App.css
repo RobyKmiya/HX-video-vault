@@ -245,7 +245,41 @@ h1, h2, h3, p { margin: 0; }
 .fact-list dd { margin: 0; font-weight: 500; text-align: right; word-break: break-all; max-width: 60%; }
 
 /* ---------- player ---------- */
-.player-overlay { position: fixed; inset: 0; background: #0a0c11; z-index: 60; color: #fff; }
+.player-overlay { position: fixed; inset: 0; background: #0a0c11; z-index: 60; color: #fff; display: flex; overflow: hidden; }
+/* 画面区与详情面板是并排的兄弟节点，面板打开时画面自动让出宽度 */
+.player-main { position: relative; flex: 1; min-width: 0; height: 100%; }
+.player-top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.player-hud {
+  position: absolute; left: 50%; bottom: 112px; transform: translateX(-50%);
+  background: rgba(0, 0, 0, .68); color: #fff; padding: 8px 16px; border-radius: 10px;
+  font-size: 13px; letter-spacing: .3px; pointer-events: none; z-index: 4;
+  animation: hudfade .9s ease-out forwards;
+}
+@keyframes hudfade { 0% { opacity: 0; transform: translate(-50%, 6px); } 15%, 70% { opacity: 1; transform: translate(-50%, 0); } 100% { opacity: 0; } }
+
+/* 播放页内嵌详情：深色变量覆盖，直接复用详情组件的全部编辑能力 */
+.player-detail {
+  flex: 0 0 auto; width: 392px; height: 100%; overflow: hidden;
+  background: #12161f; border-left: 1px solid rgba(255, 255, 255, .08);
+  --surface: #12161f; --surface-2: #1b2130; --surface-3: #242c3c;
+  --text: #e8edf6; --muted: #98a2b5;
+  --line: rgba(255, 255, 255, .1); --line-strong: rgba(255, 255, 255, .2);
+  --accent: #8b8cf8; --accent-soft: rgba(99, 102, 241, .22);
+  color: var(--text);
+}
+.player-detail .detail-drawer { width: 100%; height: 100%; background: var(--surface); border-left: 0; transition: none; }
+.player-detail .detail-head { border-bottom-color: var(--line); }
+.player-detail .note-area { background: #0d111a; color: var(--text); }
+.player-detail .select, .player-detail select { background: #0d111a; color: var(--text); }
+.player-detail .btn { background: var(--surface-2); border-color: var(--line); color: var(--text); }
+.player-detail .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.player-detail .pill { background: var(--surface-2); border-color: var(--line); }
+.player-detail .btn.danger { color: #ff8b98; border-color: rgba(224, 79, 95, .5); }
+.player-detail .icon-btn { color: var(--muted); }
+.player-detail { animation: detailslide .16s ease-out; }
+@keyframes detailslide { from { transform: translateX(18px); opacity: .55; } }
+@media (max-width: 1080px) { .player-detail { width: 330px; } }
+@media (max-width: 820px) { .player-detail { width: 300px; } }
 .player-stage { position: absolute; inset: 0; display: grid; place-items: center; padding: 56px 12px 88px; }
 /* 等比留黑，竖屏也不会被拉伸或裁切；上下留白避开标题栏与控制条 */
 .player-stage video { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; background: #000; display: block; }

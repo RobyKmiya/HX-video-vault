@@ -225,9 +225,31 @@ export default function App() {
       if (!took) void api.mpvClose().catch(() => {});
       const result = await api.playback(id);
       setPlayer({ ...result, source: took ? "mpv" : result.source });
+      // 正在播的那条就是「当前选中的那条」，关掉播放器后网格要知道该高亮谁
+      setSelected(new Set([id]));
+      setDetailId((cur) => (cur === null ? null : id));
       await refreshMeta();
     } catch (e) { notify(String(e)); }
   }, [notify, refreshMeta]);
+
+  // 退出播放后：只更新这一条（进度/已看/元数据），并把卡片拉回视野，
+  // 不整体重载第一页 —— 否则在第 N 页看的视频会被重置回第一页，选中的也就丢了
+  const syncAfterPlay = useCallback(async (id: number) => {
+    try {
+      const fresh = await api.video(id);
+      setVideoPage((prev) => ({
+        ...prev,
+        items: prev.items.map((it) => (it.id === id ? fresh : it)),
+      }));
+    } catch { /* 取不到就算了，不打断退出 */ }
+    setSelected(new Set([id]));
+    setDetailId((cur) => (cur === null ? null : id));
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[data-video-id="${id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  }, []);
 
   const openPlayer = (video: VideoItem) => { void openById(video.id); };
 
@@ -516,9 +538,18 @@ export default function App() {
       {player && (
         <Player
           info={player}
-          onClose={() => { if (player?.source === "mpv") void api.mpvClose(); setPlayer(null); void refreshMeta(); void loadVideos(true); }}
+          onClose={() => {
+            const id = player?.video.id;
+            if (player?.source === "mpv") void api.mpvClose();
+            setPlayer(null);
+            void refreshMeta();
+            if (id) void syncAfterPlay(id); else void loadVideos(true);
+          }}
           onNext={() => movePlayer(1)}
           onPrev={() => movePlayer(-1)}
+          tags={tags}
+          collections={activeCollections}
+          onChanged={() => { void refreshMeta(); }}
           onError={notify}
         />
       )}

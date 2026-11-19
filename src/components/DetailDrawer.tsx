@@ -13,6 +13,8 @@ interface Props {
   onPlay: (v: VideoItem) => void;
   onChanged: () => void;
   onError: (msg: string) => void;
+  /** 嵌入播放页时用：不自适应宽度、不折叠、不带加宽按钮 */
+  embedded?: boolean;
 }
 
 type DrawerMode = "dock" | "wide" | "rail";
@@ -35,7 +37,7 @@ function readWidth(): number {
   return window.innerWidth < 1180 ? 340 : 384;
 }
 
-export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChanged, onError }: Props) {
+export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChanged, onError, embedded = false }: Props) {
   const [note, setNote] = useState(video.note);
   const [rating, setRating] = useState(video.rating);
   const [favorite, setFavorite] = useState(video.favorite);
@@ -133,8 +135,8 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
 
-  // 折叠态：只留一条窄栏，主区几乎全给视频网格
-  if (mode === "rail") {
+  // 折叠态：只留一条窄栏，主区几乎全给视频网格（嵌入播放页时不折叠）
+  if (mode === "rail" && !embedded) {
     return (
       <aside className="detail-drawer rail">
         <button className="rail-btn" onClick={() => setMode("dock")} title="展开详情">
@@ -160,29 +162,35 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
 
   return (
     <aside
-      className={`detail-drawer ${mode} ${resizing ? "resizing" : ""}`}
-      style={{ width: shownWidth }}
+      className={`detail-drawer ${embedded ? "embedded" : mode} ${resizing ? "resizing" : ""}`}
+      style={embedded ? undefined : { width: shownWidth }}
     >
-      <div
-        className="detail-resizer"
-        onPointerDown={startResize}
-        onDoubleClick={() => setWidth(384)}
-        title="拖动调宽度，双击复位"
-      />
+      {!embedded && (
+        <div
+          className="detail-resizer"
+          onPointerDown={startResize}
+          onDoubleClick={() => setWidth(384)}
+          title="拖动调宽度，双击复位"
+        />
+      )}
       <div className="detail-head">
-        <span className="detail-kicker">视频详情</span>
+        <span className="detail-kicker">{embedded ? "视频详情 · 可直接编辑" : "视频详情"}</span>
         <div className="detail-head-actions">
-          <button
-            className="icon-btn"
-            onClick={() => setMode(mode === "wide" ? "dock" : "wide")}
-            title={mode === "wide" ? "收窄详情" : "加宽详情（便于编辑备注）"}
-          >
-            <Icon name={mode === "wide" ? "right" : "left"} size={17} />
-          </button>
-          <button className="icon-btn" onClick={() => setMode("rail")} title="折叠详情">
-            <Icon name="menu" size={17} />
-          </button>
-          <button className="icon-btn" onClick={onClose} title="关闭（Esc）"><Icon name="x" size={18} /></button>
+          {!embedded && (
+            <>
+              <button
+                className="icon-btn"
+                onClick={() => setMode(mode === "wide" ? "dock" : "wide")}
+                title={mode === "wide" ? "收窄详情" : "加宽详情（便于编辑备注）"}
+              >
+                <Icon name={mode === "wide" ? "right" : "left"} size={17} />
+              </button>
+              <button className="icon-btn" onClick={() => setMode("rail")} title="折叠详情">
+                <Icon name="menu" size={17} />
+              </button>
+            </>
+          )}
+          <button className="icon-btn" onClick={onClose} title={embedded ? "收起详情" : "关闭（Esc）"}><Icon name="x" size={18} /></button>
         </div>
       </div>
       <div className="detail-scroll">

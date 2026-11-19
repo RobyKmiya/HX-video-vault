@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { api } from "../api";
 import { formatDuration } from "../format";
-import type { PlaybackInfo } from "../types";
+import { DetailDrawer } from "./DetailDrawer";
+import type { Collection, PlaybackInfo, Tag, VideoItem } from "../types";
 
 interface Props {
   info: PlaybackInfo;
+  tags: Tag[];
+  collections: Collection[];
   onClose: () => void;
   onNext: () => void;
   onPrev: () => void;
+  onChanged: () => void;
   onError: (msg: string) => void;
 }
 
@@ -39,18 +43,29 @@ const RATIOS: Partial<Record<AspectKey, number>> = {
   "9:16": 9 / 16,
 };
 
+type SideKeyMode = "switch" | "seek";
+
 interface PlayerPrefs {
   autoNext: boolean;
   speed: number;
   aspect: AspectKey;
   autoHide: boolean;
   loopOne: boolean;
+  /** 垂直滚轮调音量 */
+  wheelVolume: boolean;
+  /** 鼠标侧键：切上下条 / 快退快进 */
+  sideKey: SideKeyMode;
+  /** 播放页默认展开详情 */
+  detailOpen: boolean;
 }
 
 const PREFS_KEY = "video-vault.player.prefs";
 
 function loadPrefs(): PlayerPrefs {
-  const fallback: PlayerPrefs = { autoNext: true, speed: 1, aspect: "contain", autoHide: true, loopOne: false };
+  const fallback: PlayerPrefs = {
+    autoNext: true, speed: 1, aspect: "contain", autoHide: true, loopOne: false,
+    wheelVolume: true, sideKey: "switch", detailOpen: false,
+  };
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return fallback;
@@ -61,15 +76,19 @@ function loadPrefs(): PlayerPrefs {
       aspect: ASPECTS.some((a) => a.key === parsed.aspect) ? (parsed.aspect as AspectKey) : "contain",
       autoHide: parsed.autoHide ?? fallback.autoHide,
       loopOne: parsed.loopOne ?? fallback.loopOne,
+      wheelVolume: parsed.wheelVolume ?? fallback.wheelVolume,
+      sideKey: parsed.sideKey === "seek" ? "seek" : "switch",
+      detailOpen: parsed.detailOpen ?? fallback.detailOpen,
     };
   } catch {
     return fallback;
   }
 }
 
-export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
+export function Player({ info, tags, collections, onClose, onNext, onPrev, onChanged, onError }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
   const [prefs, setPrefs] = useState<PlayerPrefs>(loadPrefs);
@@ -82,6 +101,14 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
   const [controls, setControls] = useState(true);
   const [menu, setMenu] = useState<"aspect" | "settings" | null>(null);
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
+  const [detailOpen, setDetailOpen] = useState(prefs.detailOpen);
+  const [detailVideo, setDetailVideo] = useState<VideoItem>(info.video);
+  const [hud, setHud] = useState<string | null>(null);
+  const volRef = useRef(0.8);
+  const hudTimer = useRef<number | undefined>(undefined);
+  const wheelAcc = useRef(0);
+  const hAcc = useRef(0);
+  const lastSeekAt = useRef(0);
   const lastSave = useRef(0);
   const hideTimer = useRef<number | undefined>(undefined);
   const resumedFor = useRef<number | null>(null);
@@ -111,6 +138,10 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
       .catch((e) => onError(String(e)));
   }, [info.video.id, info.video.duration_sec, duration, isMpv, current, onError]);
 
+  // save 的依赖里有时长/进度，会频繁变化；用 ref 让鼠标监听器只挂一次
+  const saveRef = useRef(save);
+  useEffect(() => { saveRef.current = save; }, [save]);
+
   // 换片时把上一集的现场清干净，否则进度条会先跳一下再回来
   useEffect(() => {
     setCurrent(0);
@@ -119,7 +150,11 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
     setControls(true);
     setMenu(null);
     resumedFor.current = null;
-  }, [info.video.id, info.video.duration_sec]);
+    setDetailVideo(info.video);
+  }, [info.video.id, info.video.duration_sec, info.video]);
+
+  useEffect(() => { volRef.current = volume; }, [volume]);
+  useEffect(() => { updatePrefs({ detailOpen }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [detailOpen]);
 
   // mpv 模式：进度/时长/暂停由 IPC 事件推送，不依赖 <video> 元素
   useEffect(() => {
@@ -221,13 +256,110 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
     if (videoRef.current) videoRef.current.muted = next;
   }, [isMpv, volume]);
 
+  const showHud = useCallback((text: string) => {
+    setHud(text);
+    window.clearTimeout(hudTimer.current);
+    hudTimer.current = window.setTimeout(() => setHud(null), 900);
+  }, []);
+
+  // 滚轮 / 侧键统一入口：音量、进度都在这里算
+  const applyVolume = useCallback((delta: number) => {
+    const next = Math.max(0, Math.min(1, Math.round((volRef.current + delta) * 100) / 100));
+    volRef.current = next;
+    setVolume(next);
+    setMuted(next === 0);
+    if (isMpv) void api.mpvCommand("volume", next * 100);
+    else if (videoRef.current) { videoRef.current.volume = next; videoRef.current.muted = next === 0; }
+    showHud(next === 0 ? "静音" : `音量 ${Math.round(next * 100)}%`);
+  }, [isMpv, showHud]);
+
+  // 详情面板里的编辑要即时回显：改完重新取一条，避免用旧的 tags/collections
+  const refreshDetail = useCallback(async () => {
+    try {
+      const fresh = await api.video(info.video.id);
+      setDetailVideo(fresh);
+    } catch { /* 取不到就继续用旧的 */ }
+    onChanged();
+  }, [info.video.id, onChanged]);
+
+  // 鼠标：垂直滚轮音量、横向滚轮/Shift+滚轮 进度、侧键按设置切条或快进快退
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) return; // 保留缩放
+      const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY) * 0.6;
+      if (horiz) {
+        e.preventDefault();
+        // 触控板的横滚是一串小 delta，累计够了才走一步，否则会疯跳
+        hAcc.current += e.deltaX;
+        if (Math.abs(hAcc.current) < 40) return;
+        const step = hAcc.current > 0 ? 5 : -5;
+        hAcc.current = 0;
+        seekBy(step);
+        showHud(step > 0 ? "快进 5 秒" : "快退 5 秒");
+        return;
+      }
+      if (e.shiftKey) {
+        e.preventDefault();
+        const now = Date.now();
+        if (now - lastSeekAt.current < 240) return; // 一次滑动只算一步
+        lastSeekAt.current = now;
+        const step = e.deltaY > 0 ? 10 : -10;
+        seekBy(step);
+        showHud(step > 0 ? "快进 10 秒" : "快退 10 秒");
+        return;
+      }
+      if (!prefs.wheelVolume) return;
+      e.preventDefault();
+      // 触控板一次会给很多小 delta，累计到阈值再动一格，避免音量乱跳
+      wheelAcc.current += e.deltaY;
+      if (Math.abs(wheelAcc.current) < 40) return;
+      applyVolume(wheelAcc.current < 0 ? 0.05 : -0.05);
+      wheelAcc.current = 0;
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();
+      const forward = e.button === 4;
+      if (prefs.sideKey === "seek") {
+        seekBy(forward ? 10 : -10);
+        showHud(forward ? "快进 10 秒" : "快退 10 秒");
+      } else {
+        saveRef.current(true);
+        if (forward) onNext(); else onPrev();
+      }
+    };
+    const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("mousedown", onMouseDown);
+    el.addEventListener("mouseup", swallow);
+    el.addEventListener("auxclick", swallow);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("mousedown", onMouseDown);
+      el.removeEventListener("mouseup", swallow);
+      el.removeEventListener("auxclick", swallow);
+    };
+  }, [applyVolume, onNext, onPrev, prefs.sideKey, prefs.wheelVolume, seekBy, showHud]);
+
   // 快捷键：←→ 5 秒，J/L 10 秒，↑↓ 音量，空格/K 暂停，N/P 上下一条，M 静音，F 全屏
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) return;
       const key = e.key.toLowerCase();
-      if (e.key === "Escape") { save(true); if (menu) { setMenu(null); return; } onClose(); return; }
+      if (e.key === "Escape") {
+        save(true);
+        if (menu) { setMenu(null); return; }
+        // 详情面板开着时，Esc 先收面板，再按一次才退出播放
+        if (detailOpen) { setDetailOpen(false); return; }
+        onClose();
+        return;
+      }
       if (key === "n") { e.preventDefault(); save(true); onNext(); return; }
       if (key === "p") { e.preventDefault(); save(true); onPrev(); return; }
       if (key === " " || key === "k") { e.preventDefault(); togglePlay(); return; }
@@ -238,12 +370,13 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
       if (e.key === "ArrowUp") { e.preventDefault(); setMute(false); const v = Math.min(1, volume + 0.1); setVolume(v); if (isMpv) void api.mpvCommand("volume", v * 100); else if (videoRef.current) videoRef.current.volume = v; return; }
       if (e.key === "ArrowDown") { e.preventDefault(); const v = Math.max(0, volume - 0.1); setVolume(v); setMuted(v === 0); if (isMpv) void api.mpvCommand("volume", v * 100); else if (videoRef.current) { videoRef.current.volume = v; videoRef.current.muted = v === 0; } return; }
       if (key === "f") { void wrapRef.current?.requestFullscreen?.(); return; }
+      if (key === "i") { setDetailOpen((v) => !v); return; }
       if (key === "m") { setMute(!muted); return; }
       if (key === "c") { setControls((c) => !c); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onNext, onPrev, save, menu, togglePlay, seekBy, setMute, volume, muted, isMpv]);
+  }, [onClose, onNext, onPrev, save, menu, togglePlay, seekBy, setMute, volume, muted, isMpv, detailOpen]);
 
   useEffect(() => () => save(true), [save]);
 
@@ -256,7 +389,7 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
     }, 2600);
   };
 
-  const seek = (e: MouseEvent<HTMLDivElement>) => {
+  const seek = (e: ReactMouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const sec = ((e.clientX - rect.left) / rect.width) * duration;
     if (isMpv) { void api.mpvCommand("seek", sec); return; }
@@ -299,6 +432,7 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
 
   return (
     <div className="player-overlay" ref={wrapRef} onMouseMove={poke}>
+      <div className="player-main" ref={stageRef}>
       <div className="player-stage" onClick={() => { setMenu(null); poke(); }}>
         {isMpv ? (
           <div className="player-external">
@@ -352,6 +486,15 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
             {info.video.watch_count > 0 ? ` · 第 ${info.video.watch_count + 1} 次观看` : ""}
             {!isMpv && !external ? ` · ${info.video.width || "?"}×${info.video.height || "?"} · ${aspectLabel}` : ""}
           </div>
+        </div>
+        <div className="player-top-right">
+          <button
+            className={`player-round ${detailOpen ? "on" : ""}`}
+            onClick={() => setDetailOpen((v) => !v)}
+            title="详情面板 (I)：边看边改标签/评分/备注"
+          >
+            <Icon name="info" size={18} />
+          </button>
         </div>
       </div>
 
@@ -447,7 +590,22 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
                       {ASPECTS.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
                     </select>
                   </div>
-                  <p className="player-pop-hint">设置存在本机，下次打开影匣仍然生效。</p>
+                  <label className="player-pop-row">
+                    <input type="checkbox" checked={prefs.wheelVolume} onChange={(e) => updatePrefs({ wheelVolume: e.target.checked })} />
+                    <span>滚轮调音量（横滚 / Shift+滚轮调进度）</span>
+                  </label>
+                  <div className="player-pop-row">
+                    <span>鼠标侧键</span>
+                    <select value={prefs.sideKey} onChange={(e) => updatePrefs({ sideKey: e.target.value as SideKeyMode })}>
+                      <option value="switch">上一条 / 下一条</option>
+                      <option value="seek">快退 / 快进 10 秒</option>
+                    </select>
+                  </div>
+                  <label className="player-pop-row">
+                    <input type="checkbox" checked={detailOpen} onChange={(e) => setDetailOpen(e.target.checked)} />
+                    <span>播放页默认展开详情（I 键切换）</span>
+                  </label>
+                  <p className="player-pop-hint">设置存在本机，下次打开影匣仍然生效。详情面板里能直接改评分、标签、目录和备注。</p>
                 </div>
               )}
             </div>
@@ -456,6 +614,23 @@ export function Player({ info, onClose, onNext, onPrev, onError }: Props) {
               <Icon name="fullscreen" size={18} />
             </button>
           </div>
+        </div>
+      )}
+        {hud && <div className="player-hud">{hud}</div>}
+      </div>
+
+      {detailOpen && (
+        <div className="player-detail">
+          <DetailDrawer
+            embedded
+            video={detailVideo}
+            tags={tags}
+            collections={collections}
+            onClose={() => setDetailOpen(false)}
+            onPlay={() => togglePlay()}
+            onChanged={() => void refreshDetail()}
+            onError={onError}
+          />
         </div>
       )}
     </div>

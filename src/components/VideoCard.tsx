@@ -24,6 +24,7 @@ export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) 
   return (
     <article
       className={`video-card ${selected ? "selected" : ""}`}
+      data-video-id={video.id}
       onClick={(e) => onSelect(video, e)}
       onDoubleClick={() => onOpen(video, false)}
     >

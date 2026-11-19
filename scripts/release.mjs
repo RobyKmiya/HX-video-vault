@@ -8,6 +8,7 @@
  *   node scripts/release.mjs --set 0.2.0
  *   node scripts/release.mjs --dry-run
  *   node scripts/release.mjs --no-install   # 只打包不安装
+ *   node scripts/release.mjs --no-test      # 跳过 Rust 单测（只改了前端时用）
  *
  * 与画匣 release.mjs 完全隔离：
  *   - 只操作本仓库 E:\VideoVault 与安装目录 %LOCALAPPDATA%\影匣；
@@ -35,6 +36,7 @@ const PRODUCT = '影匣';
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const doInstall = !argv.includes('--no-install');
+const skipTests = argv.includes('--no-test');
 const bumpKind = argv.includes('--minor') ? 'minor' : argv.includes('--major') ? 'major' : 'patch';
 const setIndex = argv.indexOf('--set');
 const explicitVersion = setIndex >= 0 ? argv[setIndex + 1] : null;
@@ -68,7 +70,9 @@ function syncVersion(next) {
 
   const cargo = fs.readFileSync(CARGO, 'utf8');
   const cargoNext = cargo.replace(/^(version\s*=\s*)"[^"]+"/m, `$1"${next}"`);
-  if (cargoNext === cargo) throw new Error('Cargo.toml 里没找到 version 字段');
+  // 同版本重发时 replace 不会改变内容，这里要能识别「已经是目标版本」而不是报错
+  const already = new RegExp(`^version\\s*=\\s*"${next.replace(/\./g, '\\.')}"`, 'm').test(cargo);
+  if (cargoNext === cargo && !already) throw new Error('Cargo.toml 里没找到 version 字段');
   fs.writeFileSync(CARGO, cargoNext, 'utf8');
 
   const conf = JSON.parse(fs.readFileSync(CONF, 'utf8'));
@@ -120,7 +124,7 @@ step(`抬版本并同步三处（package.json / Cargo.toml / tauri.conf.json）`
 
 step('前端类型检查', () => { runNpm('check'); ok('tsc 通过'); });
 
-step('Rust 单元测试（离线）', () => {
+skipTests ? warn('已跳过 Rust 单测（--no-test）') : step('Rust 单元测试（离线）', () => {
   execSync('cargo test --offline --manifest-path src-tauri/Cargo.toml --all-targets',
     { cwd: ROOT, stdio: 'inherit', env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
   ok('测试通过');
