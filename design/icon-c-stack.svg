@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bgC" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4B85FF"/>
+      <stop offset="1" stop-color="#14379F"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#bgC)"/>
+  <!-- 层叠的「匣」：三张卡片向右下错位 -->
+  <rect x="300" y="376" width="480" height="380" rx="60" fill="#7FA8FF" opacity="0.55"/>
+  <rect x="262" y="338" width="480" height="380" rx="60" fill="#C3D9FF" opacity="0.85"/>
+  <rect x="224" y="300" width="480" height="380" rx="60" fill="#FFFFFF"/>
+  <path d="M424 440 L424 540 L506 490 Z" fill="url(#bgC)"/>
+</svg>
