@@ -5,11 +5,11 @@ use std::time::{Duration, SystemTime};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::models::{
-    Collection, DayCount, LibraryInfo, Stats, Tag, VideoItem, VideoPage, VideoPatch, VideoQuery,
-    WatchRecord, WatchUpdate,
+    Collection, DayCount, DownloadTask, LibraryInfo, Stats, Tag, VideoItem, VideoPage, VideoPatch,
+    VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -230,12 +230,34 @@ CREATE TABLE IF NOT EXISTS download_tasks (
   state TEXT NOT NULL DEFAULT 'queued',
   progress REAL NOT NULL DEFAULT 0,
   target_path TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  bytes_done INTEGER NOT NULL DEFAULT 0,
+  bytes_total INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT ''
 );
 ",
     )
     .map_err(|e| e.to_string())?;
+    // v1 → v2：已存在的库补列（SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，用 pragma 探测）
+    if version < 2 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(download_tasks)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for (name, ddl) in [
+            ("tags", "ALTER TABLE download_tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "ALTER TABLE download_tasks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"),
+            ("bytes_done", "ALTER TABLE download_tasks ADD COLUMN bytes_done INTEGER NOT NULL DEFAULT 0"),
+            ("bytes_total", "ALTER TABLE download_tasks ADD COLUMN bytes_total INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !cols.iter().any(|c| c == name) {
+                conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     conn.execute(
         "INSERT OR IGNORE INTO collections (name, kind) VALUES ('收藏', 'system'), ('待看', 'system')",
         [],
@@ -798,6 +820,95 @@ pub fn known_paths(conn: &Connection) -> Result<std::collections::HashSet<String
     Ok(set)
 }
 
+// ---------- 下载任务 ----------
+
+const DOWNLOAD_COLUMNS: &str = "id, url, title, site, state, progress, target_path, tags, created_at, updated_at, error, bytes_done, bytes_total";
+
+fn map_download(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
+    Ok(DownloadTask {
+        id: row.get(0)?,
+        url: row.get(1)?,
+        title: row.get(2)?,
+        site: row.get(3)?,
+        state: row.get(4)?,
+        progress: row.get(5)?,
+        target_path: row.get(6)?,
+        tags: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        error: row.get(10)?,
+        bytes_done: row.get(11)?,
+        bytes_total: row.get(12)?,
+    })
+}
+
+pub fn list_downloads(conn: &Connection, limit: usize) -> Result<Vec<DownloadTask>, String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT {DOWNLOAD_COLUMNS} FROM download_tasks ORDER BY created_at DESC LIMIT ?1"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([limit as i64], map_download).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+pub fn get_download(conn: &Connection, id: i64) -> Result<DownloadTask, String> {
+    conn.query_row(
+        &format!("SELECT {DOWNLOAD_COLUMNS} FROM download_tasks WHERE id=?1"),
+        params![id],
+        map_download,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_download(
+    conn: &Connection,
+    url: &str,
+    title: &str,
+    site: &str,
+    target_path: &str,
+    tags: &str,
+) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO download_tasks (url, title, site, state, target_path, tags, created_at, updated_at) VALUES (?1,?2,?3,'queued',?4,?5,?6,?6)",
+        params![url, title, site, target_path, tags, now_secs()],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).map_err(|e| e.to_string())
+}
+
+pub fn update_download(
+    conn: &Connection,
+    id: i64,
+    state: &str,
+    progress: f64,
+    error: &str,
+    bytes_done: i64,
+    bytes_total: i64,
+    target_path: Option<&str>,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE download_tasks SET state=?2, progress=?3, error=?4, bytes_done=?5, bytes_total=?6, updated_at=?7, target_path=COALESCE(?8,target_path) WHERE id=?1",
+        params![id, state, progress, error, bytes_done, bytes_total, now_secs(), target_path],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_download(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM download_tasks WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 联网恢复时把中断的任务重新排队（进程被关掉时 running 状态会残留）。
+pub fn requeue_interrupted(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE download_tasks SET state='queued', error='' WHERE state IN ('running','paused')",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +969,24 @@ mod tests {
         assert_eq!(query_videos(&ctx.conn, &q).unwrap().total, 1);
         set_tag_video(&ctx.conn, id, tag_id, false).unwrap();
         assert_eq!(query_videos(&ctx.conn, &q).unwrap().total, 0);
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_task_crud_and_requeue() {
+        let (root, ctx) = temp_lib();
+        let id = create_download(&ctx.conn, "https://x/a.mp4", "a.mp4", "x.com", "/tmp/a.mp4", "标签A").unwrap();
+        let t = get_download(&ctx.conn, id).unwrap();
+        assert_eq!(t.state, "queued");
+        assert_eq!(t.tags, "标签A");
+        update_download(&ctx.conn, id, "running", 0.5, "", 50, 100, None).unwrap();
+        assert_eq!(get_download(&ctx.conn, id).unwrap().progress, 0.5);
+        // 中断后重排（模拟进程被关掉）
+        assert_eq!(requeue_interrupted(&ctx.conn).unwrap(), 1);
+        assert_eq!(get_download(&ctx.conn, id).unwrap().state, "queued");
+        delete_download(&ctx.conn, id).unwrap();
+        assert!(list_downloads(&ctx.conn, 10).unwrap().is_empty());
         drop(ctx);
         let _ = fs::remove_dir_all(root);
     }

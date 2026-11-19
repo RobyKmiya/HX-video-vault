@@ -7,6 +7,7 @@ import { DetailDrawer } from "./components/DetailDrawer";
 import { Player } from "./components/Player";
 import { StatsPanel } from "./components/StatsPanel";
 import { TagManager } from "./components/TagManager";
+import { DownloadPanel } from "./components/DownloadPanel";
 import { api } from "./api";
 import { formatBytes } from "./format";
 import type {
@@ -63,6 +64,7 @@ export default function App() {
   const [statsOpen, setStatsOpen] = useState(false);
   const [tagsOpen, setTagsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [downloadOpen, setDownloadOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -228,24 +230,26 @@ export default function App() {
     );
   }
 
-  const showPanel = statsOpen || tagsOpen;
+  const showPanel = statsOpen || tagsOpen || downloadOpen;
 
   return (
     <div className="app-shell">
       <Sidebar
         view={view}
-        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setStatsOpen(false); setTagsOpen(false); setSelected(new Set()); }}
+        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setSelected(new Set()); }}
         tags={tags}
         activeTag={activeTag}
         onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
         collections={collections}
         activeCollection={activeCollection}
         onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
-        onStats={() => { setStatsOpen(true); setTagsOpen(false); }}
-        onTags={() => { setTagsOpen(true); setStatsOpen(false); }}
+        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); }}
+        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); }}
+        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); }}
         onSettings={() => setSettingsOpen(true)}
         statsOpen={statsOpen}
         tagsOpen={tagsOpen}
+        downloadOpen={downloadOpen}
       />
 
       <main className="main">
@@ -257,6 +261,8 @@ export default function App() {
               void loadVideos(true);
             }).catch((e) => notify(String(e)));
           }} />
+            : downloadOpen ? <DownloadPanel tags={tags} onClose={() => setDownloadOpen(false)}
+                onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
             : <TagManager tags={tags} onClose={() => setTagsOpen(false)} onChanged={() => { void refreshMeta(); void loadVideos(true); }} onError={notify} />
         ) : (
           <>

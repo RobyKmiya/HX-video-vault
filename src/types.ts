@@ -116,6 +116,35 @@ export interface Settings {
   mpv_path: string | null;
 }
 
+export interface DownloadTask {
+  id: number;
+  url: string;
+  title: string;
+  site: string;
+  state: string;
+  progress: number;
+  target_path: string;
+  tags: string;
+  created_at: number;
+  updated_at: number;
+  error: string;
+  bytes_done: number;
+  bytes_total: number;
+}
+
+export interface MediaCandidate {
+  url: string;
+  name: string;
+  kind: string;
+}
+
+export interface ResolveReport {
+  site: string;
+  title: string;
+  candidates: MediaCandidate[];
+  note: string;
+}
+
 export interface EngineInfo {
   name: string;
   available: boolean;

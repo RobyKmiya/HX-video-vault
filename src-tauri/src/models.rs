@@ -148,6 +148,40 @@ pub struct WatchRecord {
     pub finished: bool,
 }
 
+/// 下载任务（对应 download_tasks 表）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadTask {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+    pub site: String,
+    pub state: String,        // queued | running | paused | done | failed | canceled
+    pub progress: f64,        // 0..1
+    pub target_path: String,
+    pub tags: String,         // 逗号分隔，完成后自动挂到入库条目
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub error: String,
+    pub bytes_done: i64,
+    pub bytes_total: i64,
+}
+
+/// 站点解析结果：一个链接里发现的媒体候选
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaCandidate {
+    pub url: String,
+    pub name: String,
+    pub kind: String, // video | image | archive
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolveReport {
+    pub site: String,
+    pub title: String,
+    pub candidates: Vec<MediaCandidate>,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SheetReport {
     pub total: usize,

@@ -25,6 +25,7 @@ zip = "2"
 blake3 = "1.8.7"
 uuid = { version = "1.29.2", features = ["v4"] }
 natord = "1.0.9"
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

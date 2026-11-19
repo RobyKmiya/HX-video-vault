@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
+  DownloadTask,
   EngineInfo,
   LibraryInfo,
+  ResolveReport,
   PlaybackInfo,
   ScanReport,
   Settings,
@@ -61,4 +63,11 @@ export const api = {
   mpvOpen: (id: number, wid?: string) => invoke<boolean>("mpv_open", { id, wid }),
   mpvCommand: (action: string, value?: unknown) => invoke<void>("mpv_command", { action, value }),
   mpvClose: () => invoke<void>("mpv_close"),
+  resolveLink: (url: string) => invoke<ResolveReport>("resolve_link", { url }),
+  downloads: () => invoke<DownloadTask[]>("list_downloads"),
+  addDownload: (url: string, title: string, site: string, targetPath: string, tags: string) =>
+    invoke<number>("add_download", { url, title, site, targetPath, tags }),
+  removeDownload: (id: number, deleteFile: boolean) =>
+    invoke<void>("remove_download", { id, deleteFile }),
+  startDownloads: () => invoke<number>("start_downloads"),
 };

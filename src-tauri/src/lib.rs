@@ -1,4 +1,5 @@
 mod db;
+mod downloader;
 mod media;
 mod models;
 mod mpv;
@@ -14,8 +15,8 @@ use walkdir::WalkDir;
 
 use db::LibraryContext;
 use models::{
-    Collection, LibraryInfo, ScanOptions, ScanReport, Stats, Tag, VideoItem, VideoPage, VideoPatch,
-    VideoQuery, WatchUpdate,
+    Collection, DownloadTask, LibraryInfo, ResolveReport, ScanOptions, ScanReport, Stats, Tag,
+    VideoItem, VideoPage, VideoPatch, VideoQuery, WatchUpdate,
 };
 use player::PlaybackInfo;
 
@@ -44,7 +45,7 @@ impl Default for Settings {
     }
 }
 
-struct AppInner {
+pub(crate) struct AppInner {
     library: Option<LibraryContext>,
     settings: Settings,
     startup_error: Option<String>,
@@ -86,6 +87,15 @@ impl AppState {
         self.inner
             .lock()
             .map_err(|_| "应用状态已损坏，请重启影匣".into())
+    }
+
+    /// 供后台线程（下载队列）使用的公开锁入口。
+    pub(crate) fn inner_lock(&self) -> Result<MutexGuard<'_, AppInner>, String> {
+        self.lock()
+    }
+
+    pub fn library_path(&self) -> Result<PathBuf, String> {
+        Ok(self.lock()?.library.as_ref().ok_or("库未打开")?.root.clone())
     }
 }
 
@@ -506,6 +516,67 @@ fn mpv_close(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 下载器 ----------
+
+#[tauri::command]
+async fn resolve_link(url: String) -> Result<ResolveReport, String> {
+    tauri::async_runtime::spawn_blocking(move || downloader::resolve(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
+    let ctx = state.lock()?;
+    db::list_downloads(&library(&ctx)?.conn, 200)
+}
+
+#[tauri::command]
+fn add_download(
+    state: State<'_, AppState>,
+    url: String,
+    title: String,
+    site: String,
+    target_path: String,
+    tags: String,
+) -> Result<i64, String> {
+    let ctx = state.lock()?;
+    db::create_download(&library(&ctx)?.conn, &url, &title, &site, &target_path, &tags)
+}
+
+#[tauri::command]
+fn remove_download(state: State<'_, AppState>, id: i64, delete_file: bool) -> Result<(), String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    if delete_file {
+        if let Ok(task) = db::get_download(&lib.conn, id) {
+            if !task.target_path.is_empty() {
+                let p = PathBuf::from(&task.target_path);
+                let partial = p.with_extension(format!("{}.part", p.extension().and_then(|s| s.to_str()).unwrap_or("bin")));
+                for f in [p, partial] {
+                    if f.is_file() { let _ = fs::remove_file(f); }
+                }
+            }
+        }
+    }
+    db::delete_download(&lib.conn, id)
+}
+
+/// 启动下载队列（前端在启动与「联网后续跑」时调用）。
+#[tauri::command]
+fn start_downloads(state: State<'_, AppState>, app: AppHandle) -> Result<usize, String> {
+    let root = state.library_path()?;
+    {
+        let ctx = state.lock()?;
+        let n = db::requeue_interrupted(&library(&ctx)?.conn)?;
+        if n > 0 {
+            let _ = app.emit("download-progress", serde_json::json!({"event": "requeued", "count": n}));
+        }
+    }
+    downloader::run_queue(app, root, 50);
+    Ok(1)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -545,6 +616,11 @@ pub fn run() {
             mpv_open,
             mpv_command,
             mpv_close,
+            resolve_link,
+            list_downloads,
+            add_download,
+            remove_download,
+            start_downloads,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");
