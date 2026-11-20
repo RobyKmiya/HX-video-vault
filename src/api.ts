@@ -2,8 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
   DownloadTask,
+  EditReport,
+  EditSource,
+  EditStatus,
   EngineInfo,
   LibraryInfo,
+  MediaMeta,
   ResolveReport,
   PlaybackInfo,
   ScanReport,
@@ -81,4 +85,11 @@ export const api = {
   removeDownload: (id: number, deleteFile: boolean) =>
     invoke<void>("remove_download", { id, deleteFile }),
   startDownloads: () => invoke<number>("start_downloads"),
+  trimVideo: (source: EditSource, startSec: number, endSec: number, accurate: boolean) =>
+    invoke<EditReport>("trim_video", { source, startSec, endSec, accurate }),
+  concatVideo: (sources: EditSource[]) => invoke<EditReport>("concat_video", { sources }),
+  editStatus: () => invoke<EditStatus>("edit_status"),
+  cancelEdit: () => invoke<void>("cancel_edit"),
+  pickVideoFiles: () => invoke<string[]>("pick_video_files"),
+  probeMedia: (path: string) => invoke<MediaMeta>("probe_media", { path }),
 };

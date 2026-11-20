@@ -11,6 +11,8 @@ interface Props {
   collections: Collection[];
   onClose: () => void;
   onPlay: (v: VideoItem) => void;
+  /** 不传（播放页内嵌形态）就不显示剪辑按钮 */
+  onEdit?: (v: VideoItem) => void;
   onChanged: () => void;
   onError: (msg: string) => void;
   /** 嵌入播放页时用：不自适应宽度、不折叠、不带加宽按钮 */
@@ -37,7 +39,7 @@ function readWidth(): number {
   return window.innerWidth < 1180 ? 340 : 384;
 }
 
-export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChanged, onError, embedded = false }: Props) {
+export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit, onChanged, onError, embedded = false }: Props) {
   const [note, setNote] = useState(video.note);
   const [rating, setRating] = useState(video.rating);
   const [favorite, setFavorite] = useState(video.favorite);
@@ -219,6 +221,11 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onChan
           <button className="btn" onClick={async () => { try { await api.playExternal(video.id); } catch (e) { onError(String(e)); } }} title="用本机 VLC / mpv 打开">
             <Icon name="external" size={15} />外部播放
           </button>
+          {onEdit && (
+            <button className="btn" onClick={() => onEdit(video)} title="裁剪或拼接此视频（成品自动入库）">
+              <Icon name="cut" size={15} />剪辑
+            </button>
+          )}
           <button className="btn" onClick={makeSheet} disabled={busy} title="用 ffmpeg 抽取 4×4 预览图">
             <Icon name="camera" size={15} />{busy ? "生成中…" : "预览图"}
           </button>

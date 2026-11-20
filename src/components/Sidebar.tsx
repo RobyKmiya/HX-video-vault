@@ -28,10 +28,12 @@ interface Props {
   onStats: () => void;
   onTags: () => void;
   onDownload: () => void;
+  onEdit: () => void;
   onSettings: () => void;
   statsOpen: boolean;
   tagsOpen: boolean;
   downloadOpen: boolean;
+  editOpen: boolean;
 }
 
 export function Sidebar(props: Props) {
@@ -169,6 +171,9 @@ export function Sidebar(props: Props) {
       <div className="sidebar-footer">
         <button className={`nav-item ${props.downloadOpen ? "active" : ""}`} onClick={props.onDownload}>
           <Icon name="down" size={17} /><span>下载器</span>
+        </button>
+        <button className={`nav-item ${props.editOpen ? "active" : ""}`} onClick={props.onEdit}>
+          <Icon name="cut" size={17} /><span>剪辑</span>
         </button>
         <button className={`nav-item ${props.statsOpen ? "active" : ""}`} onClick={props.onStats}>
           <Icon name="chart" size={17} /><span>统计面板</span>

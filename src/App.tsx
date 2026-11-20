@@ -8,6 +8,7 @@ import { Player } from "./components/Player";
 import { StatsPanel } from "./components/StatsPanel";
 import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
+import { EditPanel } from "./components/EditPanel";
 import { api } from "./api";
 import { formatBytes } from "./format";
 import type {
@@ -76,6 +77,9 @@ export default function App() {
   const [tagsOpen, setTagsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  // 从详情页/批量栏带进剪辑面板的素材；面板关闭时清空，避免下次打开误带入
+  const [editPrefill, setEditPrefill] = useState<VideoItem[] | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
@@ -370,13 +374,13 @@ export default function App() {
     );
   }
 
-  const showPanel = statsOpen || tagsOpen || downloadOpen;
+  const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
 
   return (
     <div className="app-shell">
       <Sidebar
         view={view}
-        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setSelected(new Set()); }}
+        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
         tags={tags}
         activeTag={activeTag}
         onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
@@ -385,13 +389,15 @@ export default function App() {
         onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
-        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); }}
-        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); }}
-        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); }}
+        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
+        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
+        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); }}
+        onEdit={() => { setEditOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); }}
         onSettings={() => setSettingsOpen(true)}
         statsOpen={statsOpen}
         tagsOpen={tagsOpen}
         downloadOpen={downloadOpen}
+        editOpen={editOpen}
       />
 
       <main className="main">
@@ -401,6 +407,9 @@ export default function App() {
             void openById(id);
           }} />
             : downloadOpen ? <DownloadPanel tags={tags} onClose={() => setDownloadOpen(false)}
+                onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
+            : editOpen ? <EditPanel prefill={editPrefill}
+                onClose={() => { setEditOpen(false); setEditPrefill(null); }}
                 onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
             : <TagManager tags={tags} onClose={() => setTagsOpen(false)} onChanged={() => { void refreshMeta(); void loadVideos(true); }} onError={notify} />
         ) : (
@@ -448,6 +457,15 @@ export default function App() {
               <div className="bulk-bar">
                 <span>已选 <b>{selected.size}</b> 条</span>
                 <button className="btn small" onClick={() => setBulkTagOpen((v) => !v)}><Icon name="tag" size={14} />批量打标</button>
+                <button
+                  className="btn small"
+                  disabled={selected.size < 2}
+                  title={selected.size < 2 ? "拼接至少要选 2 条（按当前列表顺序拼接）" : "把所选视频按列表顺序拼接成一条"}
+                  onClick={() => {
+                    setEditPrefill(videoPage.items.filter((it) => selected.has(it.id)));
+                    setEditOpen(true);
+                  }}
+                ><Icon name="merge" size={14} />拼接所选</button>
                 <button className="btn small" onClick={async () => {
                   try {
                     const ids = [...selected];
@@ -530,6 +548,7 @@ export default function App() {
           collections={activeCollections}
           onClose={() => setDetailId(null)}
           onPlay={(v) => void openPlayer(v)}
+          onEdit={(v) => { setEditPrefill([v]); setEditOpen(true); setDetailId(null); }}
           onChanged={() => { void refreshMeta(); void loadVideos(true); }}
           onError={notify}
         />

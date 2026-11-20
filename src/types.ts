@@ -204,6 +204,39 @@ export interface SheetProgress {
   cancelled?: boolean;
 }
 
+/** 剪辑素材：库内条目用 id，外来文件用 path */
+export interface EditSource {
+  id?: number;
+  path?: string;
+}
+
+/** ffprobe 探测结果（外来素材加入剪辑面板时预览用） */
+export interface MediaMeta {
+  duration_sec: number;
+  width: number;
+  height: number;
+  codec_video: string;
+  codec_audio: string;
+  fps: number;
+}
+
+/** 剪辑任务现场（后端 emit "edit-progress" 与 edit_status 返回同构） */
+export interface EditStatus {
+  running: boolean;
+  /** idle | probe | run | done */
+  phase: string;
+  percent: number;
+  message: string;
+}
+
+/** 剪辑结果 */
+export interface EditReport {
+  output_path: string;
+  /** copy = 流复制；encode = 重新编码 */
+  mode: string;
+  note: string;
+}
+
 export interface PlaybackInfo {
   video: VideoItem;
   source: string;

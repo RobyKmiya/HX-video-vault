@@ -211,3 +211,29 @@ pub struct SheetStatus {
     pub done: i64,
     pub pending: i64,
 }
+
+/// 剪辑素材：库内条目（按 id，压缩包条目自动解到缓存）或任意本地视频文件。
+#[derive(Debug, Clone, Deserialize)]
+pub struct EditSource {
+    pub id: Option<i64>,
+    pub path: Option<String>,
+}
+
+/// 剪辑任务现场（面板显示用）。percent 0..100，-1 表示无法估进度（仅拼接 copy 前探测期）。
+#[derive(Debug, Clone, Serialize)]
+pub struct EditStatus {
+    pub running: bool,
+    /// idle | probe | run | done
+    pub phase: String,
+    pub percent: f64,
+    pub message: String,
+}
+
+/// 剪辑结果：成品路径 + 实际走的编码方式。
+#[derive(Debug, Clone, Serialize)]
+pub struct EditReport {
+    pub output_path: String,
+    /// copy = 流复制（秒出）；encode = 重新编码（慢）
+    pub mode: String,
+    pub note: String,
+}

@@ -13,13 +13,15 @@ const VIDEO_EXT: &[&str] = &[
 ];
 const ARCHIVE_EXT: &[&str] = &["zip", "cbz"];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MediaMeta {
     pub duration_sec: f64,
     pub width: i64,
     pub height: i64,
     pub codec_video: String,
     pub codec_audio: String,
+    /// 拼接重编码时对齐到第一段的帧率（0 = 未知）
+    pub fps: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +36,7 @@ struct ProbeStream {
     width: Option<i64>,
     height: Option<i64>,
     duration: Option<String>,
+    r_frame_rate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +126,18 @@ fn which(exe: &str) -> Option<PathBuf> {
     None
 }
 
+/// 解析 ffmpeg 的分数写法（如 "30000/1001" → 29.97）；分母为 0 或解析失败返回 None。
+pub(crate) fn parse_fraction(s: &str) -> Option<f64> {
+    let (num, den) = s.split_once('/')?;
+    let num: f64 = num.trim().parse().ok()?;
+    let den: f64 = den.trim().parse().ok()?;
+    if den > 0.0 {
+        Some(num / den)
+    } else {
+        None
+    }
+}
+
 /// 用 ffprobe 取时长/分辨率/编码。失败不阻断入库（返回空元数据）。
 pub fn probe(path: &Path) -> MediaMeta {
     let Some(ffprobe) = find_tool("ffprobe") else {
@@ -133,7 +148,7 @@ pub fn probe(path: &Path) -> MediaMeta {
             "-v", "quiet",
             "-print_format", "json",
             // 只要这几个字段：整份 JSON 在字幕轨很多的文件上会大出几十倍，拖慢扫描
-            "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration",
+            "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration,r_frame_rate",
             &path.to_string_lossy(),
         ])
         .output();
@@ -158,6 +173,9 @@ pub fn probe(path: &Path) -> MediaMeta {
                     meta.width = s.width.unwrap_or(0);
                     meta.height = s.height.unwrap_or(0);
                     meta.codec_video = s.codec_name.unwrap_or_default();
+                    if meta.fps <= 0.0 {
+                        meta.fps = s.r_frame_rate.as_deref().and_then(parse_fraction).unwrap_or(0.0);
+                    }
                     if meta.duration_sec <= 0.0 {
                         meta.duration_sec = s.duration.and_then(|d| d.parse().ok()).unwrap_or(0.0);
                     }

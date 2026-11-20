@@ -1,5 +1,6 @@
 pub mod db;
 pub mod downloader;
+pub mod edit;
 pub mod media;
 pub mod models;
 mod mpv;
@@ -56,6 +57,12 @@ pub(crate) struct AppInner {
     sheet_cancel: Arc<AtomicBool>,
     /// 是否已有预览图任务在跑（防重复启动）
     sheet_running: Arc<AtomicBool>,
+    /// 剪辑任务的急停开关（ffmpeg 进程会被立刻杀掉）
+    edit_cancel: Arc<AtomicBool>,
+    /// 是否已有剪辑任务在跑（防重复启动）
+    edit_running: Arc<AtomicBool>,
+    /// 剪辑任务现场（独立锁：进度刷新不挤占全局状态锁）
+    edit_status: Arc<Mutex<crate::models::EditStatus>>,
 }
 
 #[derive(Clone)]
@@ -88,6 +95,14 @@ impl AppState {
                 mpv: None,
                 sheet_cancel: Arc::new(AtomicBool::new(false)),
                 sheet_running: Arc::new(AtomicBool::new(false)),
+                edit_cancel: Arc::new(AtomicBool::new(false)),
+                edit_running: Arc::new(AtomicBool::new(false)),
+                edit_status: Arc::new(Mutex::new(crate::models::EditStatus {
+                    running: false,
+                    phase: "idle".into(),
+                    percent: 0.0,
+                    message: String::new(),
+                })),
             })),
         }
     }
@@ -881,6 +896,103 @@ fn start_downloads(state: State<'_, AppState>, app: AppHandle) -> Result<usize, 
     Ok(1)
 }
 
+// ---------- 剪辑 ----------
+
+/// 裁剪一段视频。素材可以是库内条目（含压缩包内条目）或任意本地文件。
+#[tauri::command]
+async fn trim_video(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    source: models::EditSource,
+    start_sec: f64,
+    end_sec: f64,
+    accurate: Option<bool>,
+) -> Result<models::EditReport, String> {
+    let state = state.inner().clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        edit::run_edit_job(
+            &state,
+            &app,
+            edit::EditJob::Trim {
+                sources: vec![source],
+                start_sec,
+                end_sec,
+                accurate: accurate.unwrap_or(false),
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 按顺序拼接多段视频。全段参数一致走流复制（秒出），不一致自动重编码对齐第一段。
+#[tauri::command]
+async fn concat_video(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    sources: Vec<models::EditSource>,
+) -> Result<models::EditReport, String> {
+    let state = state.inner().clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        edit::run_edit_job(&state, &app, edit::EditJob::Concat { sources })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 剪辑任务现场（进度面板 + 关掉面板重开后恢复现场）。
+#[tauri::command]
+fn edit_status(state: State<'_, AppState>) -> Result<models::EditStatus, String> {
+    let slot = state.lock()?.edit_status.clone();
+    slot.lock()
+        .map(|s| s.clone())
+        .map_err(|_| "剪辑状态已损坏，请重启影匣".into())
+}
+
+/// 请求取消当前剪辑任务：ffmpeg 在下一行进度到来时被杀掉，半成品会被清掉。
+#[tauri::command]
+fn cancel_edit(state: State<'_, AppState>) -> Result<(), String> {
+    let ctx = state.lock()?;
+    if !ctx.edit_running.load(Ordering::SeqCst) {
+        return Err("没有正在进行的剪辑任务".into());
+    }
+    ctx.edit_cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// 多选本地视频文件（外来素材入口）。
+#[tauri::command]
+async fn pick_video_files(app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    const VIDEO_FILTER: &[&str] = &[
+        "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "m2ts", "mpg", "mpeg",
+        "3gp", "vob", "rmvb", "rm", "mts", "m2v", "asf", "f4v",
+    ];
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("视频文件", VIDEO_FILTER)
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(picked
+        .map(|list| list.iter().map(|p| p.to_string()).collect())
+        .unwrap_or_default())
+}
+
+/// 探测一个本地文件的时长/分辨率/编码（外来素材加入剪辑面板时预览用）。
+#[tauri::command]
+fn probe_media(path: String) -> Result<crate::media::MediaMeta, String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err("文件不存在".into());
+    }
+    Ok(media::probe(&p))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -932,6 +1044,12 @@ pub fn run() {
             add_download,
             remove_download,
             start_downloads,
+            trim_video,
+            concat_video,
+            edit_status,
+            cancel_edit,
+            pick_video_files,
+            probe_media,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");
