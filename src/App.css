@@ -38,7 +38,52 @@ h1, h2, h3, p { margin: 0; }
 
 /* ---------- shell ---------- */
 .app-shell { display: flex; height: 100%; background: var(--bg); }
-.boot { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted); }
+.boot-splash {
+  position: fixed; inset: 0; z-index: 999;
+  background: radial-gradient(120% 120% at 50% 30%, #141926 0%, #0e1118 55%, #0a0d13 100%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  color: #98a2b5; transition: opacity .32s ease;
+}
+.boot-splash.fade { opacity: 0; pointer-events: none; }
+.boot-mark { position: relative; width: 96px; height: 96px; display: grid; place-items: center; }
+.boot-logo {
+  width: 62px; height: 62px; border-radius: 18px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
+  display: grid; place-items: center;
+  box-shadow: 0 12px 44px rgba(99, 102, 241, .45);
+  animation: bootBreathe 2.2s ease-in-out infinite;
+}
+.boot-ring { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid rgba(139, 140, 248, .55); animation: bootRing 2.4s cubic-bezier(.2, .7, .3, 1) infinite; }
+.boot-ring.r2 { animation-delay: 1.2s; }
+@keyframes bootRing { 0% { transform: scale(.55); opacity: .9; } 100% { transform: scale(1.55); opacity: 0; } }
+@keyframes bootBreathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+.boot-title { font-size: 20px; font-weight: 600; letter-spacing: 10px; text-indent: 10px; color: #e8edf6; }
+.boot-film { width: 300px; display: flex; flex-direction: column; gap: 10px; }
+/* 胶片条：上下齿孔 + 帧格，扫光循环 —— 「影」的品牌意象 */
+.boot-film-strip {
+  position: relative; height: 34px; border-radius: 8px; overflow: hidden;
+  background: #161b28; border: 1px solid rgba(255, 255, 255, .08);
+  display: flex; align-items: center; gap: 8px; padding: 0 16px;
+}
+.boot-film-strip::before, .boot-film-strip::after {
+  content: ""; position: absolute; left: 0; right: 0; height: 5px;
+  background-image: repeating-linear-gradient(90deg, rgba(255, 255, 255, .26) 0 5px, transparent 5px 13px);
+}
+.boot-film-strip::before { top: 3px; }
+.boot-film-strip::after { bottom: 3px; }
+.boot-frame { flex: 0 0 auto; width: 25px; height: 15px; border-radius: 3px; background: linear-gradient(135deg, #2a3147, #1c2233); }
+.boot-sweep {
+  position: absolute; top: 0; bottom: 0; width: 56px;
+  background: linear-gradient(90deg, transparent, rgba(139, 140, 248, .55), transparent);
+  animation: bootSweep 1.5s linear infinite;
+}
+@keyframes bootSweep { 0% { transform: translateX(-64px); } 100% { transform: translateX(320px); } }
+.boot-bar { height: 4px; border-radius: 3px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+.boot-bar span { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #6366f1, #8b8cf8); transition: width .5s ease; }
+.boot-stage { font-size: 12.5px; letter-spacing: 1.5px; }
+.boot-dots::after { content: ""; animation: bootDots 1.2s steps(4) infinite; }
+@keyframes bootDots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+.boot-foot { font-size: 11px; color: rgba(152, 162, 181, .55); letter-spacing: 3px; }
 .main { flex: 1; min-width: 0; height: 100%; overflow-y: auto; padding: 0 28px 60px; position: relative; }
 
 /* ---------- sidebar ---------- */

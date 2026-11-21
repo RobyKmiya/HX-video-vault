@@ -91,6 +91,12 @@ export default function App() {
   const [sheet, setSheet] = useState<SheetStatus>({ running: false, total: 0, done: 0, pending: 0 });
   const [sheetLive, setSheetLive] = useState<{ done: number; total: number; name?: string } | null>(null);
   const [collectionsOpen, setCollectionsOpen] = useState(false);
+  // 启动屏：真实分阶段进度（打开 → 元数据 → 影片墙 → 就绪），元数据与影片墙并行谁慢等谁
+  const [booting, setBooting] = useState(true);
+  const [bootStage, setBootStage] = useState(0);
+  const [bootFade, setBootFade] = useState(false);
+  const [bootMetaDone, setBootMetaDone] = useState(false);
+  const [bootGridDone, setBootGridDone] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const reloadRef = useRef<() => void>(() => {});
   const lastScanRefresh = useRef(0);
@@ -127,14 +133,39 @@ export default function App() {
       notify(String(e));
     } finally {
       setLoading(false);
+      if (reset) setBootGridDone(true);
     }
   }, [view, debouncedSearch, activeTag, activeCollection, sort, page, notify]);
 
   useEffect(() => {
     api.settings().then(([s, err, i]) => {
       setSettings(s); setInfo(i); setStartupError(err); setReady(true);
-    }).catch((e) => { notify(String(e)); setReady(true); });
+      if (!i) { setBooting(false); } // 没库直接进欢迎页
+    }).catch((e) => { notify(String(e)); setReady(true); setBooting(false); });
   }, [notify]);
+
+  // 启动屏阶段推进 + 保险丝（后端万一卡死 10 秒强制放行）
+  useEffect(() => {
+    if (ready && info) setBootStage((s) => Math.max(s, 1));
+  }, [ready, info]);
+  useEffect(() => {
+    if (bootMetaDone) setBootStage((s) => Math.max(s, 2));
+  }, [bootMetaDone]);
+  useEffect(() => {
+    if (ready && info && bootMetaDone && bootGridDone) {
+      setBootStage(3);
+      const t = window.setTimeout(() => {
+        setBootFade(true);
+        const t2 = window.setTimeout(() => setBooting(false), 320);
+        return () => window.clearTimeout(t2);
+      }, 200);
+      return () => window.clearTimeout(t);
+    }
+  }, [ready, info, bootMetaDone, bootGridDone]);
+  useEffect(() => {
+    const t = window.setTimeout(() => setBooting(false), 10000);
+    return () => window.clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebouncedSearch(search), 260);
@@ -144,7 +175,9 @@ export default function App() {
   useEffect(() => {
     if (!ready || !info) return;
     void loadVideos(true);
-    void refreshMeta();
+    void refreshMeta()
+      .catch(() => {})
+      .finally(() => setBootMetaDone(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, info, view, debouncedSearch, activeTag, activeCollection, sort]);
 
@@ -406,7 +439,7 @@ export default function App() {
   };
 
   if (!ready) {
-    return <div className="boot"><Icon name="vault" size={38} /><span>正在打开影匣…</span></div>;
+    return <BootSplash stage={0} fading={false} />;
   }
 
   if (!info) {
@@ -671,6 +704,36 @@ export default function App() {
       )}
 
       {toast && <div className="toast"><Icon name="info" size={15} />{toast}</div>}
+
+      {booting && <BootSplash stage={bootStage} fading={bootFade} />}
+    </div>
+  );
+}
+
+/** 启动屏：暗色品牌底 + 脉冲环 logo + 胶片扫光加载条（影=胶片），阶段文案绑真实加载里程碑 */
+function BootSplash({ stage, fading }: { stage: number; fading: boolean }) {
+  const STAGES = ["打开影匣…", "读取库元数据…", "加载影片墙…", "就绪"];
+  const pct = [18, 45, 78, 100][Math.min(stage, 3)];
+  return (
+    <div className={`boot-splash ${fading ? "fade" : ""}`}>
+      <div className="boot-mark">
+        <span className="boot-ring r1" />
+        <span className="boot-ring r2" />
+        <div className="boot-logo"><Icon name="vault" size={34} /></div>
+      </div>
+      <div className="boot-title">影 匣</div>
+      <div className="boot-film">
+        <div className="boot-film-strip">
+          {Array.from({ length: 8 }, (_, i) => <span key={i} className="boot-frame" />)}
+          <span className="boot-sweep" />
+        </div>
+        <div className="boot-bar"><span style={{ width: `${pct}%` }} /></div>
+      </div>
+      <div className="boot-stage">
+        {STAGES[Math.min(stage, 3)]}
+        <span className="boot-dots" />
+      </div>
+      <div className="boot-foot">本地数据 · 零联网</div>
     </div>
   );
 }
