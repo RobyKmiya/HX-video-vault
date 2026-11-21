@@ -330,7 +330,8 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
         showHud(forward ? "快进 10 秒" : "快退 10 秒");
       } else {
         saveRef.current(true);
-        if (forward) onNext(); else onPrev();
+        // 返回 = 退出播放回到列表（浏览器返回语义），前进 = 下一条
+        if (forward) onNext(); else onClose();
       }
     };
     const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
@@ -629,7 +630,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
                   <div className="player-pop-row">
                     <span>鼠标侧键</span>
                     <select value={prefs.sideKey} onChange={(e) => updatePrefs({ sideKey: e.target.value as SideKeyMode })}>
-                      <option value="switch">上一条 / 下一条</option>
+                      <option value="switch">返回列表 / 下一条</option>
                       <option value="seek">快退 / 快进 10 秒</option>
                     </select>
                   </div>

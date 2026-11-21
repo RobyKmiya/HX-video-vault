@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent, MouseEvent } from "react";
+import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./components/Icons";
@@ -27,6 +27,9 @@ import type {
   VideoItem,
   VideoPage,
 } from "./types";
+
+/** 导航历史的一帧：主页结构导航（视图/文件夹/标签/收藏夹/排序） */
+type NavLoc = { view: ViewKey; folder: string[]; tag: string | null; coll: string | null; sort: string };
 
 const SORTS = [
   { key: "added", label: "最近加入" },
@@ -131,7 +134,50 @@ export default function App() {
   }, [ready, info, folderPath, collections]);
 
   // 进入某层：文件夹路径、当前收藏夹与排序一并切换（auto 夹用拖拽位次）
+  // 导航历史：结构导航（进夹/换视图/换标签/换收藏夹）都会压栈，侧键返回/前进在栈上移动
+  const histRef = useRef<{ stack: NavLoc[]; idx: number }>({ stack: [], idx: -1 });
+  const suppressNavRef = useRef(false);
+  const navFnRef = useRef<{ back: () => void; forward: () => void }>({ back: () => {}, forward: () => {} });
+  const currentLoc = (): NavLoc => ({ view, folder: folderPath, tag: activeTag, coll: activeCollection, sort });
+  const pushLoc = () => {
+    if (suppressNavRef.current) return;
+    const h = histRef.current;
+    const cur = currentLoc();
+    const top = h.stack[h.idx];
+    if (top && JSON.stringify(top) === JSON.stringify(cur)) return;
+    h.stack = h.stack.slice(0, h.idx + 1);
+    h.stack.push(cur);
+    if (h.stack.length > 60) h.stack.shift();
+    h.idx = h.stack.length - 1;
+  };
+  const applyLoc = (loc: NavLoc) => {
+    setView(loc.view);
+    setFolderPath(loc.folder);
+    setActiveTag(loc.tag);
+    setActiveCollection(loc.coll);
+    setSort(loc.sort);
+    setSelected(new Set());
+  };
+  const navBack = () => {
+    const h = histRef.current;
+    if (h.idx <= 0) return;
+    suppressNavRef.current = true;
+    h.idx -= 1;
+    applyLoc(h.stack[h.idx]);
+    suppressNavRef.current = false;
+  };
+  const navForward = () => {
+    const h = histRef.current;
+    if (h.idx >= h.stack.length - 1) return;
+    suppressNavRef.current = true;
+    h.idx += 1;
+    applyLoc(h.stack[h.idx]);
+    suppressNavRef.current = false;
+  };
+  useEffect(() => { navFnRef.current = { back: navBack, forward: navForward }; });
+
   const enterFolder = useCallback((path: string[]) => {
+    pushLoc();
     setFolderPath(path);
     setSelected(new Set());
     if (path.length) {
@@ -174,7 +220,7 @@ export default function App() {
 
   // 启动屏阶段推进 + 保险丝（后端万一卡死 10 秒强制放行）
   useEffect(() => {
-    if (ready && info) setBootStage((s) => Math.max(s, 1));
+    if (ready && info) { setBootStage((s) => Math.max(s, 1)); pushLoc(); }
   }, [ready, info]);
   useEffect(() => {
     if (bootMetaDone) setBootStage((s) => Math.max(s, 2));
@@ -403,7 +449,7 @@ export default function App() {
       ? `${SCAN_PHASE[scanProgress.phase]} ${scanProgress.done}/${scanProgress.total}`
       : "扫描中…";
 
-  const selectOne = (video: VideoItem, ev: MouseEvent) => {
+  const selectOne = (video: VideoItem, ev: ReactMouseEvent) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
@@ -495,19 +541,39 @@ export default function App() {
 
   const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
 
+  // 鼠标侧键（主页）：返回/前进在导航历史上移动；播放页/面板/详情有各自语义，不在这里抢
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return;
+      e.preventDefault();
+      if (player || showPanel || detailId || settingsOpen || sheetOpen || collectionsOpen) return;
+      if (e.button === 3) navFnRef.current.back(); else navFnRef.current.forward();
+    };
+    const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("auxclick", swallow);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("auxclick", swallow);
+    };
+  }, [player, showPanel, detailId, settingsOpen, sheetOpen, collectionsOpen]);
+
   return (
     <div className="app-shell">
       <Sidebar
         view={view}
-        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
+        onView={(v) => { pushLoc(); setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
         tags={tags}
         activeTag={activeTag}
-        onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
+        onTag={(t) => { pushLoc(); setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
         collections={activeCollections}
         activeCollection={activeCollection}
         onCollection={(c) => {
           const target = collections.find((x) => x.deleted_at === 0 && x.name === c);
           if (target && target.kind === "auto") { enterFolder(c ? c.split(" › ") : []); return; }
+          pushLoc();
           setFolderPath([]);
           setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added");
         }}
@@ -568,7 +634,7 @@ export default function App() {
                 <strong>{videoPage.total.toLocaleString()}</strong> 条视频
                 {(activeTag || activeCollection) && (
                   <span className="filter-chip">{activeTag ? `标签：${activeTag}` : `收藏夹：${activeCollection}`}
-                    <button onClick={() => { setActiveTag(null); setActiveCollection(null); setFolderPath([]); setSort("added"); }}><Icon name="x" size={12} /></button>
+                    <button onClick={() => { pushLoc(); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setSort("added"); }}><Icon name="x" size={12} /></button>
                   </span>
                 )}
               </div>
@@ -771,7 +837,7 @@ export default function App() {
 
       {collectionsOpen && (
         <CollectionManager
-          items={collections}
+          items={collections.filter((c) => c.kind !== "auto")}
           onChanged={() => { void refreshMeta(); void loadVideos(true); }}
           onClose={() => setCollectionsOpen(false)}
           notify={notify}
@@ -1105,7 +1171,7 @@ function CollectionManager({
             </div>
           )}
 
-          <p className="hint">删除收藏夹只是把它放进回收站，视频文件和在库里的记录都不受影响。</p>
+          <p className="hint">删除收藏夹只是把它放进回收站，视频文件和在库里的记录都不受影响。磁盘文件夹由扫描自动镜像（主页层级浏览可见），是存储结构，不在这里列出。</p>
         </div>
       </div>
     </div>

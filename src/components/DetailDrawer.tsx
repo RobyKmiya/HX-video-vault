@@ -354,20 +354,8 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
             <button className="btn small" onClick={() => void createFav()} disabled={!newFav.trim()}>创建</button>
           </div>
           <div className="tag-pills">
-            {collections.map((c) => {
+            {collections.filter((c) => c.kind !== "auto").map((c) => {
               const has = video.collections.includes(c.name);
-              // 磁盘文件夹镜像夹（auto）：随扫描同步，手动加入/移出会被下次扫描覆盖，故只读展示
-              if (c.kind === "auto") {
-                return (
-                  <span
-                    key={c.id}
-                    className={`pill ${has ? "on" : ""}`}
-                    title="跟随磁盘文件夹自动生成：把视频移进/移出该文件夹并重新扫描即自动归位"
-                  >
-                    <Icon name="folder" size={12} />{c.name}{has ? <Icon name="check" size={11} /> : null}
-                  </span>
-                );
-              }
               return (
                 <button
                   key={c.id}
@@ -382,8 +370,16 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
                 </button>
               );
             })}
-            {collections.length === 0 && <span className="muted">还没有收藏夹，上面输入名字就能建</span>}
+            {collections.filter((c) => c.kind !== "auto").length === 0 && <span className="muted">还没有收藏夹，上面输入名字就能建</span>}
           </div>
+          {(() => {
+            const inFolders = collections.filter((c) => c.kind === "auto" && video.collections.includes(c.name));
+            return inFolders.length > 0 ? (
+              <p className="hint" style={{ marginTop: 8 }}>
+                所在文件夹：{inFolders.map((c) => c.name).join("、")}（存储结构，跟随磁盘；主页按文件夹层级浏览）
+              </p>
+            ) : null;
+          })()}
         </div>
 
         <div className="detail-section">
