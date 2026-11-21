@@ -997,6 +997,113 @@ pub fn reorder_collections(conn: &Connection, ids: &[i64]) -> Result<(), String>
     Ok(())
 }
 
+/// 扫描后同步「磁盘文件夹 → 自动收藏夹」：
+/// 库根下的每层子目录镜像成 kind='auto' 的收藏夹（名 = 相对路径以 › 连接，分组 = 首段），
+/// 视频/压缩包条目按所在目录自动归位；文件移走或删掉的旧链接会被清掉。
+/// 根目录直接放的文件不归类（无文件夹可镜像）。手动收藏夹（custom/system）不受影响。
+/// 返回本次同步的文件夹数。
+pub fn sync_folder_collections(
+    conn: &Connection,
+    root: &Path,
+    seen_paths: &[String],
+) -> Result<usize, String> {
+    use std::collections::{HashMap, HashSet};
+
+    let root_str = root.to_string_lossy().to_string();
+    let seen: HashSet<&String> = seen_paths.iter().collect();
+
+    // 本次在盘上的视频 id → 所在相对目录（空串 = 根目录，跳过）
+    let mut dir_ids: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut dir_paths: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, path FROM videos")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for (vid, path) in rows.filter_map(Result::ok) {
+            if !seen.contains(&path) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root_str)
+                .map(|rest| rest.trim_start_matches(['\\', '/']))
+                .unwrap_or("");
+            let Some(idx) = rel.rfind(['\\', '/']) else { continue }; // 根目录直放：无文件夹
+            let rel_dir = &rel[..idx];
+            dir_ids.entry(rel_dir.to_string()).or_default().push(vid);
+            dir_paths.entry(rel_dir.to_string()).or_default().push(path);
+        }
+    }
+
+    let mut synced = 0usize;
+    for (rel_dir, ids) in &dir_ids {
+        let name = rel_dir.replace(['\\', '/'], " › ");
+        let group = name.split(" › ").next().unwrap_or("").to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO collections (name, kind, group_name) VALUES (?1, 'auto', ?2)",
+            params![name, group],
+        )
+        .map_err(|e| e.to_string())?;
+        let cid: i64 = conn
+            .query_row(
+                "SELECT id FROM collections WHERE name=?1 AND kind='auto'",
+                params![name],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let paths_json = serde_json::to_string(&dir_paths[rel_dir]).map_err(|e| e.to_string())?;
+
+        // 文件已移走/删除的旧链接清掉
+        conn.execute(
+            "DELETE FROM collection_videos
+             WHERE collection_id=?1
+               AND video_id NOT IN (SELECT id FROM videos WHERE path IN (SELECT value FROM json_each(?2)))",
+            params![cid, paths_json],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 缺的链接补上，位次排到当前夹尾
+        conn.execute(
+            "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at, position)
+             SELECT ?1, v.id, ?2,
+                    COALESCE((SELECT MAX(position)+1 FROM collection_videos WHERE collection_id=?1), 0)
+                      + ROW_NUMBER() OVER (ORDER BY v.id) - 1
+             FROM videos v
+             WHERE v.path IN (SELECT value FROM json_each(?3))
+               AND v.id NOT IN (SELECT video_id FROM collection_videos WHERE collection_id=?1)",
+            params![cid, now_secs(), paths_json],
+        )
+        .map_err(|e| e.to_string())?;
+        synced += 1;
+    }
+
+    // 已清空/已消失的文件夹：目录里已经没有视频 → 整夹清空并删除，
+    // 否则残留链接永远挂在 side 栏（文件夹是唯一事实源，夹随盘走）
+    let occupied: HashSet<String> = dir_ids
+        .keys()
+        .map(|d| d.replace(['\\', '/'], " › "))
+        .collect();
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM collections WHERE kind='auto'")
+        .map_err(|e| e.to_string())?;
+    let autos: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    for (cid, name) in autos {
+        if !occupied.contains(&name) {
+            conn.execute("DELETE FROM collection_videos WHERE collection_id=?1", params![cid])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM collections WHERE id=?1", params![cid])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(synced)
+}
+
 /// 收藏夹内视频拖拽排序。前端只传当前可见子集的新顺序：
 /// 未出现在子集里的成员整体后移 subset 长度（保持原有相对次序），避免位次冲突。
 pub fn reorder_collection_videos(
@@ -1897,6 +2004,102 @@ mod tests {
             ctx.conn.query_row("SELECT sort_order FROM collections WHERE id=1", [], |r| r.get(0)).unwrap(),
         );
         assert_eq!(so, (0, 1));
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 文件夹镜像：嵌套子目录 → auto 收藏夹（名=相对路径 › 连接，分组=首段）；
+    /// 成员按目录归位、移动后重链、根目录直放不归类、手选夹不受影响
+    #[test]
+    fn sync_folder_collections_mirrors_disk_tree() {
+        let (root, ctx) = temp_lib();
+        for d in ["A", "A/B"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let paths = vec![
+            root.join("A").join("a.mp4"),
+            root.join("A").join("B").join("b.mp4"),
+            root.join("A").join("合集.zip"),
+            root.join("root.mp4"),
+        ];
+        for p in &paths {
+            fs::write(p, b"x").unwrap();
+        }
+        let ps = |p: &Path| p.to_string_lossy().to_string();
+        upsert_video(&ctx.conn, &rec(&ps(&paths[0]), 0)).unwrap();
+        upsert_video(&ctx.conn, &rec(&ps(&paths[1]), 0)).unwrap();
+        upsert_video(&ctx.conn, &rec(&ps(&paths[2]), 0)).unwrap();
+        upsert_video(&ctx.conn, &rec(&ps(&paths[2]), 1)).unwrap();
+        upsert_video(&ctx.conn, &rec(&ps(&paths[3]), 0)).unwrap();
+        let manual = create_collection(&ctx.conn, "手选", "").unwrap();
+        let root_vid: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path=?1", params![ps(&paths[3])], |r| r.get(0))
+            .unwrap();
+        set_collection_video(&ctx.conn, manual, root_vid, true).unwrap();
+
+        let seen: Vec<String> = paths.iter().map(|p| ps(p)).collect();
+        let synced = sync_folder_collections(&ctx.conn, &root, &seen).unwrap();
+        assert_eq!(synced, 2, "A 与 A/B 两个文件夹镜像");
+
+        let auto_of = |name: &str| -> Option<i64> {
+            ctx.conn
+                .query_row("SELECT id FROM collections WHERE name=?1 AND kind='auto'", params![name], |r| r.get(0))
+                .optional()
+                .unwrap()
+        };
+        let col_a = auto_of("A").expect("应有 auto 夹 A");
+        let col_ab = auto_of("A › B").expect("应有 auto 夹 A › B");
+        let group_of = |id: i64| -> String {
+            ctx.conn
+                .query_row("SELECT group_name FROM collections WHERE id=?1", params![id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(group_of(col_a), "A", "分组 = 首段目录名");
+        assert_eq!(group_of(col_ab), "A");
+
+        let member_ids = |cid: i64| -> Vec<i64> {
+            ctx.conn
+                .prepare("SELECT video_id FROM collection_videos WHERE collection_id=?1 ORDER BY position")
+                .unwrap()
+                .query_map(params![cid], |r| r.get(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        let vid = |p: &Path| -> i64 {
+            ctx.conn
+                .query_row("SELECT id FROM videos WHERE path=?1", params![ps(p)], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            member_ids(col_a),
+            vec![vid(&paths[0]), vid(&paths[2]), vid(&paths[2]) + 1],
+            "A 夹：a.mp4 + 压缩包两集（入库顺序即位次）"
+        );
+        assert_eq!(member_ids(col_ab), vec![vid(&paths[1])], "A › B 夹：b.mp4");
+        assert!(
+            !member_ids(col_a).contains(&root_vid) && !member_ids(col_ab).contains(&root_vid),
+            "根目录直放的文件不归类"
+        );
+        assert_eq!(member_ids(manual).len(), 1, "手选夹不受镜像影响");
+
+        // 文件从 A/B 移到 A：重扫后链接应跟着走（旧位置清掉、新位置补链）
+        // 注意：路径 UPDATE 后旧路径在 videos 里已不存在，断言一律用移动前捕获的 id
+        let id_b = vid(&paths[1]);
+        let moved = root.join("A").join("b.mp4");
+        fs::rename(root.join("A").join("B").join("b.mp4"), &moved).unwrap();
+        let n = ctx
+            .conn
+            .execute("UPDATE videos SET path=?2 WHERE path=?1", params![ps(&paths[1]), ps(&moved)])
+            .unwrap();
+        assert_eq!(n, 1);
+        let seen2 = vec![ps(&paths[0]), ps(&moved), ps(&paths[2]), ps(&paths[3])];
+        sync_folder_collections(&ctx.conn, &root, &seen2).unwrap();
+        assert!(auto_of("A › B").is_none(), "B 目录已无视频，镜像夹应整夹消失");
+        assert!(!member_ids(col_ab).contains(&id_b), "旧位置链接应被清掉");
+        assert!(member_ids(col_a).contains(&id_b), "新位置应补链");
 
         drop(ctx);
         let _ = fs::remove_dir_all(&root);

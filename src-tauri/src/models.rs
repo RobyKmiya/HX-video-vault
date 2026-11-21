@@ -112,6 +112,9 @@ pub struct ScanReport {
     /// 因为文件没变而跳过的条目数
     #[serde(default)]
     pub reused: usize,
+    /// 文件夹镜像：本次同步的自动收藏夹数（磁盘子目录 → kind='auto'）
+    #[serde(default)]
+    pub folders: usize,
     pub errors: Vec<String>,
 }
 

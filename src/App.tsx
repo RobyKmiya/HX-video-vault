@@ -307,7 +307,7 @@ export default function App() {
     try {
       const report = await api.scan({ root: info.root, recursive: true, entry_limit: 60 });
       notify(
-        `扫描完成：新增 ${report.added} 条，更新 ${report.updated} 条，失效 ${report.missing} 条` +
+        `扫描完成：新增 ${report.added} 条，更新 ${report.updated} 条，失效 ${report.missing} 条，文件夹镜像 ${report.folders ?? 0} 个` +
         `（本次识别 ${report.probed ?? 0} 条，跳过 ${report.reused ?? 0} 条）`,
       );
       await Promise.all([loadVideos(true), refreshMeta()]);
@@ -543,7 +543,7 @@ export default function App() {
                   e.target.value = "";
                 }} title="批量加入收藏夹">
                   <option value="">加入收藏夹…</option>
-                  {activeCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  {activeCollections.filter((c) => c.kind !== "auto").map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
                 <button className="btn small" onClick={() => setSelected(new Set())}>取消选择</button>
                 {bulkTagOpen && (
@@ -891,7 +891,7 @@ function CollectionManager({
 
               <div className="collection-list">
                 {active.map((c) => {
-                  const isSystem = c.kind === "system";
+                  const isSystem = c.kind === "system" || c.kind === "auto";
                   const isEditing = editing === c.id;
                   return (
                     <div key={c.id} className="collection-row">
@@ -909,7 +909,8 @@ function CollectionManager({
                             <Icon name="folder" size={15} />
                             <span className="truncate">{c.name}</span>
                             {c.group_name && <span className="group-chip">{c.group_name}</span>}
-                            {isSystem && <span className="muted small">内置</span>}
+                            {c.kind === "auto" && <span className="group-chip">跟随文件夹</span>}
+                            {c.kind === "system" && <span className="muted small">内置</span>}
                           </span>
                           <span className="nav-count">{c.count}</span>
                           <button className="btn small" disabled={isSystem}

@@ -107,6 +107,8 @@ export interface ScanReport {
   probed?: number;
   /** 因为文件没变而跳过的条目数 */
   reused?: number;
+  /** 文件夹镜像：本次同步的自动收藏夹数 */
+  folders?: number;
   errors: string[];
 }
 

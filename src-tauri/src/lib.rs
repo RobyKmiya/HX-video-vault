@@ -282,6 +282,7 @@ async fn scan(
             skipped: 0,
             probed: 0,
             reused: 0,
+            folders: 0,
             errors: Vec::new(),
         };
 
@@ -384,11 +385,12 @@ async fn scan(
             );
         }
 
-        // 6) 标记失效
+        // 6) 标记失效 + 文件夹镜像：磁盘子目录自动归成 kind='auto' 收藏夹并归位
         {
             let guard = state.lock()?;
             let lib = library(&guard)?;
             report.missing = db::mark_missing(&lib.conn, &seen).unwrap_or(0);
+            report.folders = db::sync_folder_collections(&lib.conn, &root, &seen).unwrap_or(0);
         }
         report.reused = reused;
         let _ = app.emit(

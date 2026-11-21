@@ -356,6 +356,18 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
           <div className="tag-pills">
             {collections.map((c) => {
               const has = video.collections.includes(c.name);
+              // 磁盘文件夹镜像夹（auto）：随扫描同步，手动加入/移出会被下次扫描覆盖，故只读展示
+              if (c.kind === "auto") {
+                return (
+                  <span
+                    key={c.id}
+                    className={`pill ${has ? "on" : ""}`}
+                    title="跟随磁盘文件夹自动生成：把视频移进/移出该文件夹并重新扫描即自动归位"
+                  >
+                    <Icon name="folder" size={12} />{c.name}{has ? <Icon name="check" size={11} /> : null}
+                  </span>
+                );
+              }
               return (
                 <button
                   key={c.id}
