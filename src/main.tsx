@@ -3,6 +3,11 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./App.css";
 
+// 首帧启动画面（index.html 里的 #boot-static）由 App 挂载成功时摘掉；
+// 这里再加一道 5 秒保险丝：万一 React 在渲染阶段就崩了，错误边界也要能被看见，
+// 不能让人对着一个永远转圈的启动画面干等。
+window.setTimeout(() => document.getElementById("boot-static")?.remove(), 5000);
+
 /** 启动错误边界：渲染崩溃不再黑屏，给出错误信息与重试入口 */
 class BootBoundary extends React.Component<{ children: React.ReactNode }, { err: Error | null }> {
   state = { err: null as Error | null };

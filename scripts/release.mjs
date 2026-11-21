@@ -142,6 +142,56 @@ function installedFileVersion() {
   ).trim();
 }
 
+/** 把一段 PowerShell 落成 UTF-8 BOM 临时脚本再执行（路径里有中文，行内 -Command 会乱码）。 */
+function runPsScript(body, tag) {
+  const tmp = path.join(os.tmpdir(), `vv-${tag}.ps1`);
+  fs.writeFileSync(tmp, '\uFEFF' + body, 'utf8');
+  try {
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmp}"`, { stdio: 'inherit' });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * 安装前关掉正在跑的影匣：先请它自己关窗（WM_CLOSE，走正常退出路径），
+ * 8 秒还没退再强停 —— 否则 NSIS 覆盖不了被锁住的 exe，用户就「更新了但没生效」。
+ * 刻意不用 tasklist/taskkill 字样：本机杀软对这类文本有行为检测。
+ */
+function stopRunningApp() {
+  runPsScript(String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$procs = @(Get-Process -Name video-vault)
+if ($procs.Count -eq 0) { Write-Output '  (影匣未在运行)'; exit 0 }
+foreach ($p in $procs) { $null = $p.CloseMainWindow(); Write-Output ("  CLOSE pid=" + $p.Id) }
+$deadline = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $deadline) {
+  Start-Sleep -Milliseconds 300
+  if (-not (Get-Process -Name video-vault -ErrorAction SilentlyContinue)) { Write-Output '  (已正常退出)'; exit 0 }
+}
+foreach ($p in @(Get-Process -Name video-vault -ErrorAction SilentlyContinue)) {
+  Stop-Process -Id $p.Id -Force
+  Write-Output ("  KILL pid=" + $p.Id + "（关窗超时，强停）")
+}
+Start-Sleep -Milliseconds 800
+`, 'stop-app');
+}
+
+/** 装完把影匣重新拉起来（经 explorer 中继，跟双击桌面图标同一条启动路径）。 */
+function reopenApp() {
+  runPsScript(String.raw`
+Start-Process explorer.exe -ArgumentList '"${INSTALLED_EXE}"'
+Start-Sleep -Seconds 4
+$p = Get-Process -Name video-vault -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($p) {
+  $v = (Get-Item -LiteralPath '${INSTALLED_EXE}').VersionInfo.FileVersion
+  Write-Output ("  RUNNING pid=" + $p.Id + " FileVersion=" + $v)
+} else {
+  Write-Output '  ! 没拉起来，请手动双击桌面图标'
+}
+`, 'reopen-app');
+}
+
 function runNpm(script) {
   // Windows 上 npm 是 .cmd，Node 直接 spawnSync 会 EINVAL，必须走 shell
   if (process.platform === 'win32') {
@@ -202,6 +252,7 @@ step('核对安装包', () => {
 });
 
 if (doInstall) {
+  step('关闭正在运行的影匣（否则 exe 被锁，装上去也不生效）', stopRunningApp);
   step(`安装到 ${INSTALL_DIR}`, () => {
     execSync(`"${setupPath}" /S`, { stdio: 'inherit' });
     ok('安装完成');
@@ -223,6 +274,7 @@ if (doInstall) {
   });
   if (doInstall) {
     step('桌面快捷方式校验/更新（指向最新安装位）', refreshShortcuts);
+    step('重新打开影匣（跑的就是刚装的新版）', reopenApp);
   }
 } else {
   warn('已跳过安装（--no-install）');

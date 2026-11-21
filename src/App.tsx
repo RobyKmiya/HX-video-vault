@@ -249,6 +249,12 @@ export default function App() {
     }
   }, [view, debouncedSearch, activeTag, activeCollection, sort, sortParam, page, notify]);
 
+  // 静态首帧画面（index.html 里那层不依赖 JS 的启动屏）在 React 首帧后交棒：
+  // 两层同款视觉，交接无缝。App 万一挂载失败，由 main.tsx 的 5 秒保险丝兜底摘掉。
+  useEffect(() => {
+    document.getElementById("boot-static")?.remove();
+  }, []);
+
   useEffect(() => {
     api.settings().then(([s, err, i]) => {
       setSettings(s); setInfo(i); setStartupError(err); setReady(true);

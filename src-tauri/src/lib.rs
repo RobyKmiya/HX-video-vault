@@ -1276,8 +1276,65 @@ fn reorder_collection_videos(
     db::reorder_collection_videos(&lib.conn, collection_id, &video_ids)
 }
 
+/// 单实例守卫（Windows 命名互斥体）：
+/// 连点桌面图标、或更新后旧窗口没关，第二个进程不再启动一整套窗口 + 再开一次数据库，
+/// 而是把已存在的窗口叫到前台就退出 —— 之前连点几次就会出现两个进程互抢同一个 SQLite 库。
+#[cfg(windows)]
+mod single_instance {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    /// 互斥体句柄故意不关：进程活着它就活着，进程退出系统自动回收
+    static MUTEX: AtomicIsize = AtomicIsize::new(0);
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// true = 我是唯一实例；false = 已经有一个在跑。
+    /// 极端情况下拿不到句柄（没权限等）也放行：宁可能开两个，也不要把人挡在门外。
+    pub fn claim() -> bool {
+        let name = wide("Local\\VideoVault.SingleInstance.v1");
+        unsafe {
+            let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+            if h.is_null() {
+                return true;
+            }
+            MUTEX.store(h as isize, Ordering::SeqCst);
+            GetLastError() != ERROR_ALREADY_EXISTS
+        }
+    }
+
+    /// 把已在跑的影匣窗口叫到前台：用户连点的预期是「还是那一个窗口」。
+    pub fn focus_existing() -> bool {
+        let title = wide("影匣 · 本地视频库");
+        unsafe {
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if hwnd.is_null() {
+                return false;
+            }
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            true
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 单实例守卫必须在建窗口之前：第二个实例连 Tauri 都不初始化，直接退出。
+    #[cfg(windows)]
+    {
+        if !single_instance::claim() {
+            single_instance::focus_existing();
+            std::process::exit(0);
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

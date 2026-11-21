@@ -4,8 +4,92 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>影匣 · 本地视频库</title>
+    <style>
+      /* 首帧启动画面：纯 HTML/CSS，不依赖 JS —— WebView 一拿到文档就先画这层，
+         等 React 起来后由 App 摘掉（与 React 的 BootSplash 同款视觉，交接看不出切换）。 */
+      html, body { height: 100%; margin: 0; background: #0a0d13; }
+      #boot-static {
+        position: fixed; inset: 0; z-index: 9999;
+        background: radial-gradient(120% 120% at 50% 30%, #141926 0%, #0e1118 55%, #0a0d13 100%);
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+        color: #98a2b5; transition: opacity .3s ease;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        -webkit-user-select: none; user-select: none;
+      }
+      #boot-static.bs-fade { opacity: 0; pointer-events: none; }
+      .bs-mark { position: relative; width: 96px; height: 96px; display: grid; place-items: center; }
+      .bs-logo {
+        width: 62px; height: 62px; border-radius: 18px;
+        background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
+        display: grid; place-items: center;
+        box-shadow: 0 12px 44px rgba(99, 102, 241, .45);
+        animation: bsBreathe 2.2s ease-in-out infinite;
+      }
+      .bs-ring { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid rgba(139, 140, 248, .55); animation: bsRing 2.4s cubic-bezier(.2, .7, .3, 1) infinite; }
+      .bs-ring.r2 { animation-delay: 1.2s; }
+      .bs-title { font-size: 20px; font-weight: 600; letter-spacing: 10px; text-indent: 10px; color: #e8edf6; }
+      .bs-film { width: 300px; display: flex; flex-direction: column; gap: 10px; }
+      .bs-strip {
+        position: relative; height: 34px; border-radius: 8px; overflow: hidden;
+        background: #161b28; border: 1px solid rgba(255, 255, 255, .08);
+        display: flex; align-items: center; gap: 8px; padding: 0 16px;
+      }
+      .bs-strip::before, .bs-strip::after {
+        content: ""; position: absolute; left: 0; right: 0; height: 5px;
+        background-image: repeating-linear-gradient(90deg, rgba(255, 255, 255, .26) 0 5px, transparent 5px 13px);
+      }
+      .bs-strip::before { top: 3px; }
+      .bs-strip::after { bottom: 3px; }
+      .bs-frame { flex: 0 0 auto; width: 25px; height: 15px; border-radius: 3px; background: linear-gradient(135deg, #2a3147, #1c2233); }
+      .bs-sweep {
+        position: absolute; top: 0; bottom: 0; width: 56px;
+        background: linear-gradient(90deg, transparent, rgba(139, 140, 248, .55), transparent);
+        animation: bsSweep 1.5s linear infinite;
+      }
+      .bs-bar { height: 4px; border-radius: 3px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+      .bs-bar span {
+        display: block; height: 100%; width: 42%; border-radius: 3px;
+        background: linear-gradient(90deg, #6366f1, #8b8cf8);
+        animation: bsSlide 1.5s ease-in-out infinite;
+      }
+      .bs-stage { font-size: 12.5px; letter-spacing: 1.5px; }
+      .bs-dots::after { content: ""; animation: bsDots 1.2s steps(4) infinite; }
+      .bs-foot { font-size: 11px; color: rgba(152, 162, 181, .55); letter-spacing: 3px; }
+      @keyframes bsRing { 0% { transform: scale(.55); opacity: .9; } 100% { transform: scale(1.55); opacity: 0; } }
+      @keyframes bsBreathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+      @keyframes bsSweep { 0% { transform: translateX(-64px); } 100% { transform: translateX(320px); } }
+      @keyframes bsSlide { 0% { margin-left: -42%; } 100% { margin-left: 100%; } }
+      @keyframes bsDots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+      @media (prefers-reduced-motion: reduce) {
+        .bs-logo, .bs-ring, .bs-sweep, .bs-bar span { animation: none; }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot-static">
+      <div class="bs-mark">
+        <span class="bs-ring"></span>
+        <span class="bs-ring r2"></span>
+        <div class="bs-logo">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="3"></rect>
+            <circle cx="12" cy="12" r="3.5"></circle>
+            <path d="M12 8.5V6M15.5 12H18"></path>
+          </svg>
+        </div>
+      </div>
+      <div class="bs-title">影 匣</div>
+      <div class="bs-film">
+        <div class="bs-strip">
+          <span class="bs-frame"></span><span class="bs-frame"></span><span class="bs-frame"></span><span class="bs-frame"></span>
+          <span class="bs-frame"></span><span class="bs-frame"></span><span class="bs-frame"></span><span class="bs-frame"></span>
+          <span class="bs-sweep"></span>
+        </div>
+        <div class="bs-bar"><span></span></div>
+      </div>
+      <div class="bs-stage">正在打开影匣<span class="bs-dots"></span></div>
+      <div class="bs-foot">本地数据 · 零联网</div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
