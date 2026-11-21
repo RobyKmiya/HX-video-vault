@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent } from "react";
+import type { DragEvent, MouseEvent } from "react";
 import { Icon } from "./components/Icons";
 import { Sidebar, type ViewKey } from "./components/Sidebar";
 import { VideoCard } from "./components/VideoCard";
@@ -33,6 +33,7 @@ const SORTS = [
   { key: "duration", label: "时长" },
   { key: "count", label: "观看次数" },
   { key: "rating", label: "评分" },
+  { key: "manual", label: "手动排序（收藏夹拖拽）" },
 ];
 
 const SCAN_PHASE: Record<ScanProgress["phase"], string> = {
@@ -353,6 +354,44 @@ export default function App() {
     if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) setDetailId(video.id);
   };
 
+  // 收藏夹内拖拽排序：进收藏夹视图自动切「手动排序」，卡片可拖拽换位
+  const activeCollectionId = useMemo(
+    () => collections.find((c) => c.deleted_at === 0 && c.name === activeCollection)?.id ?? null,
+    [collections, activeCollection],
+  );
+  const dragEnabled = !!(activeCollection && activeCollectionId && sort === "manual");
+  const dragVideoRef = useRef<number | null>(null);
+  const onCardDragStart = (video: VideoItem, e: DragEvent<HTMLElement>) => {
+    dragVideoRef.current = video.id;
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onCardDragOver = (video: VideoItem, e: DragEvent<HTMLElement>) => {
+    if (dragVideoRef.current == null || dragVideoRef.current === video.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    e.currentTarget.classList.add("drag-over");
+  };
+  const onCardDragLeave = (e: DragEvent<HTMLElement>) => e.currentTarget.classList.remove("drag-over");
+  const onCardDrop = (video: VideoItem, e: DragEvent<HTMLElement>) => {
+    e.currentTarget.classList.remove("drag-over");
+    const dragId = dragVideoRef.current;
+    dragVideoRef.current = null;
+    if (!dragEnabled || dragId == null || dragId === video.id || !activeCollectionId) return;
+    e.preventDefault();
+    const items = [...videoPage.items];
+    const from = items.findIndex((it) => it.id === dragId);
+    const to = items.findIndex((it) => it.id === video.id);
+    if (from < 0 || to < 0) return;
+    const [moved] = items.splice(from, 1);
+    items.splice(to, 0, moved);
+    setVideoPage((prev) => ({ ...prev, items }));
+    void api
+      .reorderCollectionVideos(activeCollectionId, items.map((it) => it.id))
+      .then(() => notify("收藏夹顺序已保存"))
+      .catch((err) => notify(String(err)));
+  };
+  const onCardDragEnd = (e: DragEvent<HTMLElement>) => e.currentTarget.classList.remove("drag-over");
+
   const chooseLibrary = async () => {
     try {
       const dir = await api.pickDirectory();
@@ -404,9 +443,10 @@ export default function App() {
         onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
         collections={activeCollections}
         activeCollection={activeCollection}
-        onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
+        onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added"); }}
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
+        onReordered={() => void refreshMeta()}
         onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
         onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
         onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); }}
@@ -460,8 +500,8 @@ export default function App() {
               <div>
                 <strong>{videoPage.total.toLocaleString()}</strong> 条视频
                 {(activeTag || activeCollection) && (
-                  <span className="filter-chip">{activeTag ? `标签：${activeTag}` : `目录：${activeCollection}`}
-                    <button onClick={() => { setActiveTag(null); setActiveCollection(null); }}><Icon name="x" size={12} /></button>
+                  <span className="filter-chip">{activeTag ? `标签：${activeTag}` : `收藏夹：${activeCollection}`}
+                    <button onClick={() => { setActiveTag(null); setActiveCollection(null); setSort("added"); }}><Icon name="x" size={12} /></button>
                   </span>
                 )}
               </div>
@@ -497,12 +537,12 @@ export default function App() {
                   try {
                     const ids = [...selected];
                     for (const v of ids) await api.setCollection(id, v, true);
-                    notify(`已把 ${ids.length} 条加入该目录`);
+                    notify(`已把 ${ids.length} 条加入收藏夹`);
                     await Promise.all([refreshMeta(), loadVideos(true)]);
                   } catch (err) { notify(String(err)); }
                   e.target.value = "";
-                }} title="批量加入目录">
-                  <option value="">加入目录…</option>
+                }} title="批量加入收藏夹">
+                  <option value="">加入收藏夹…</option>
                   {activeCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
                 <button className="btn small" onClick={() => setSelected(new Set())}>取消选择</button>
@@ -543,6 +583,12 @@ export default function App() {
                       onSelect={selectOne}
                       onOpen={(item) => setDetailId(item.id)}
                       onPlay={(item) => void openPlayer(item)}
+                      dragEnabled={dragEnabled}
+                      onDragStart={onCardDragStart}
+                      onDragOver={onCardDragOver}
+                      onDragLeave={onCardDragLeave}
+                      onDrop={onCardDrop}
+                      onDragEnd={onCardDragEnd}
                     />
                   ))}
                 </div>
@@ -797,12 +843,12 @@ function CollectionManager({
   const groups = [...new Set(active.map((c) => c.group_name).filter(Boolean))];
 
   const create = async () => {
-    if (!newName.trim()) { notify("先给目录起个名字"); return; }
+    if (!newName.trim()) { notify("先给收藏夹起个名字"); return; }
     try {
       await api.createCollection(newName, newGroup);
       setNewName("");
       onChanged();
-      notify(`目录「${newName.trim()}」已就绪`);
+      notify(`收藏夹「${newName.trim()}」已就绪`);
     } catch (e) { notify(String(e)); }
   };
 
@@ -820,19 +866,19 @@ function CollectionManager({
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal collection-modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="panel-head">
-          <div><h1>目录管理</h1><p>自定义收藏夹：可改名、可分组、删除进回收站</p></div>
+          <div><h1>收藏夹管理</h1><p>自建收藏夹：可改名、可分组、可拖拽排序（侧栏）、删除进回收站</p></div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
 
         <div className="modal-tabs">
-          <button className={tab === "active" ? "on" : ""} onClick={() => setTab("active")}>目录（{active.length}）</button>
+          <button className={tab === "active" ? "on" : ""} onClick={() => setTab("active")}>收藏夹（{active.length}）</button>
           <button className={tab === "trash" ? "on" : ""} onClick={() => setTab("trash")}>回收站（{trashed.length}）</button>
         </div>
 
         <div className="modal-body">
           {tab === "active" ? (
             <>
-              <div className="collection-new">
+              <div className="collection-new" title="新建后可在侧栏拖拽排序">
                 <input value={newName} placeholder="新目录名" onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") void create(); }} />
                 <input value={newGroup} placeholder="分组（可空）" list="vv-collection-groups"
@@ -882,7 +928,7 @@ function CollectionManager({
                     </div>
                   );
                 })}
-                {active.length === 0 && <div className="nav-empty">还没有自定义目录</div>}
+                {active.length === 0 && <div className="nav-empty">还没有收藏夹</div>}
               </div>
             </>
           ) : (
@@ -914,7 +960,7 @@ function CollectionManager({
             </div>
           )}
 
-          <p className="hint">删除目录只是把目录放进回收站，视频文件和在库里的记录都不受影响。</p>
+          <p className="hint">删除收藏夹只是把它放进回收站，视频文件和在库里的记录都不受影响。</p>
         </div>
       </div>
     </div>

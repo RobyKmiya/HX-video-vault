@@ -46,6 +46,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
   const [favorite, setFavorite] = useState(video.favorite);
   const [completed, setCompleted] = useState(video.completed);
   const [addedTag, setAddedTag] = useState("");
+  const [newFav, setNewFav] = useState("");
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<DrawerMode>(readMode);
   const [width, setWidth] = useState<number>(readWidth);
@@ -114,6 +115,32 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
   const toggleTag = async (tagId: number, add: boolean) => {
     try {
       await api.tagVideo(video.id, tagId, add);
+      onChanged();
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  // 详情页内联新建收藏夹：建好立刻把当前视频加进去
+  const createFav = async () => {
+    const name = newFav.trim();
+    if (!name) return;
+    try {
+      await api.createCollection(name, "");
+      await api.setCollection(name, video.id, true);
+      setNewFav("");
+      onChanged();
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  // 红心 = 「我的收藏」默认收藏夹开关（其余收藏夹不动）；favorite 字段保留给角标/统计
+  const toggleFavorite = async (next: boolean) => {
+    setFavorite(next);
+    try {
+      await api.patch({ id: video.id, favorite: next });
+      await api.setCollection("我的收藏", video.id, next).catch(() => {});
       onChanged();
     } catch (e) {
       onError(String(e));
@@ -270,7 +297,11 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
                 <Icon name="star" size={20} />
               </button>
             ))}
-            <button className={`toggle-chip ${favorite ? "on" : ""}`} onClick={() => { setFavorite(!favorite); void patch({ favorite: !favorite }); }}>
+            <button
+              className={`toggle-chip ${favorite ? "on" : ""}`}
+              onClick={() => void toggleFavorite(!favorite)}
+              title="加入/移出默认收藏夹「我的收藏」（更多收藏夹在下方「收藏夹」区勾选）"
+            >
               <Icon name="heart" size={15} />{favorite ? "已收藏" : "收藏"}
             </button>
             <button className={`toggle-chip ${completed ? "on" : ""}`} onClick={() => { setCompleted(!completed); void patch({ completed: !completed }); }}>
@@ -312,7 +343,16 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
         </div>
 
         <div className="detail-section">
-          <div className="section-title">目录</div>
+          <div className="section-title">收藏夹</div>
+          <div className="fav-create">
+            <input
+              value={newFav}
+              placeholder="新建收藏夹并加入…"
+              onChange={(e) => setNewFav(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void createFav(); }}
+            />
+            <button className="btn small" onClick={() => void createFav()} disabled={!newFav.trim()}>创建</button>
+          </div>
           <div className="tag-pills">
             {collections.map((c) => {
               const has = video.collections.includes(c.name);
@@ -330,6 +370,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
                 </button>
               );
             })}
+            {collections.length === 0 && <span className="muted">还没有收藏夹，上面输入名字就能建</span>}
           </div>
         </div>
 

@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Icon } from "./Icons";
+import { api } from "../api";
 import type { Collection, Tag } from "../types";
 
 export type ViewKey =
@@ -25,6 +26,7 @@ interface Props {
   onCollection: (c: string | null) => void;
   onCreateCollection: () => void;
   onManageCollections: () => void;
+  onReordered?: () => void;
   onStats: () => void;
   onTags: () => void;
   onDownload: () => void;
@@ -38,6 +40,7 @@ interface Props {
 
 export function Sidebar(props: Props) {
   const [tagGroupsOpen, setTagGroupsOpen] = useState<Record<string, boolean>>({});
+  const dragCollRef = useRef<number | null>(null);
   const groups = new Map<string, Tag[]>();
   for (const tag of props.tags) {
     const key = tag.category || "未分类";
@@ -130,42 +133,71 @@ export function Sidebar(props: Props) {
       </nav>
 
       {props.collections.length > 0 && (
-        <nav className="nav-group nav-short">
-          <div className="nav-caption nav-caption-row">
-            <span>目录</span>
-            <span className="caption-actions">
-              <button className="caption-action" onClick={props.onCreateCollection} title="新建目录">
-                <Icon name="plus" size={14} />
+      <nav className="nav-group nav-short">
+        <div className="nav-caption nav-caption-row">
+          <span>收藏夹</span>
+          <span className="caption-actions">
+            <button className="caption-action" onClick={props.onCreateCollection} title="新建收藏夹">
+              <Icon name="plus" size={14} />
+            </button>
+            <button className="caption-action" onClick={props.onManageCollections} title="管理收藏夹">
+              <Icon name="settings" size={14} />
+            </button>
+          </span>
+        </div>
+        {collectionGroups.map(([group, list]) => (
+          <div key={group || "__none"} className="tag-group">
+            {group && (
+              <div className="tag-group-head static">
+                <Icon name="folder" size={12} />
+                <span>{group}</span>
+                <span className="tag-group-count">{list.length}</span>
+              </div>
+            )}
+            {list.map((c) => (
+              <button
+                key={c.id}
+                className={`nav-item nav-item-sm ${props.activeCollection === c.name ? "active" : ""}`}
+                onClick={() => props.onCollection(c.name)}
+                title={c.group_name ? `${c.group_name} / ${c.name} · ${c.count} 条（拖拽可排序）` : `${c.name} · ${c.count} 条（拖拽可排序）`}
+                draggable
+                onDragStart={(e) => {
+                  dragCollRef.current = c.id;
+                  e.dataTransfer.effectAllowed = "move";
+                  e.currentTarget.classList.add("dragging");
+                }}
+                onDragOver={(e) => {
+                  if (dragCollRef.current == null || dragCollRef.current === c.id) return;
+                  e.preventDefault();
+                  e.currentTarget.classList.add("drag-over");
+                }}
+                onDragLeave={(e) => e.currentTarget.classList.remove("drag-over")}
+                onDrop={(e) => {
+                  e.currentTarget.classList.remove("drag-over");
+                  const dragId = dragCollRef.current;
+                  dragCollRef.current = null;
+                  if (dragId == null || dragId === c.id) return;
+                  e.preventDefault();
+                  const ids = props.collections.filter((x) => x.kind === "custom").map((x) => x.id);
+                  const from = ids.indexOf(dragId);
+                  const to = ids.indexOf(c.id);
+                  if (from < 0 || to < 0) return;
+                  ids.splice(to, 0, ids.splice(from, 1)[0]);
+                  void api.reorderCollections(ids).then(() => props.onReordered?.());
+                }}
+                onDragEnd={(e) => {
+                  e.currentTarget.classList.remove("dragging");
+                  e.currentTarget.classList.remove("drag-over");
+                }}
+              >
+                <Icon name="folder" size={15} />
+                <span className="truncate">{c.name}</span>
+                <span className="nav-count">{c.count}</span>
               </button>
-              <button className="caption-action" onClick={props.onManageCollections} title="管理目录">
-                <Icon name="settings" size={14} />
-              </button>
-            </span>
+            ))}
           </div>
-          {collectionGroups.map(([group, list]) => (
-            <div key={group || "__none"} className="tag-group">
-              {group && (
-                <div className="tag-group-head static">
-                  <Icon name="folder" size={12} />
-                  <span>{group}</span>
-                  <span className="tag-group-count">{list.length}</span>
-                </div>
-              )}
-              {list.map((c) => (
-                <button
-                  key={c.id}
-                  className={`nav-item nav-item-sm ${props.activeCollection === c.name ? "active" : ""}`}
-                  onClick={() => props.onCollection(c.name)}
-                  title={c.group_name ? `${c.group_name} / ${c.name} · ${c.count} 条` : `${c.name} · ${c.count} 条`}
-                >
-                  <Icon name="folder" size={15} />
-                  <span className="truncate">{c.name}</span>
-                  <span className="nav-count">{c.count}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-        </nav>
+        ))}
+      </nav>
       )}
 
       <div className="sidebar-footer">

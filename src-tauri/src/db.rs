@@ -9,7 +9,7 @@ use crate::models::{
     VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS collection_videos (
   collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
   added_at INTEGER NOT NULL DEFAULT 0,
+  position INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (collection_id, video_id)
 );
 
@@ -289,6 +290,34 @@ CREATE TABLE IF NOT EXISTS download_tasks (
             if !cols.iter().any(|c| c == name) {
                 conn.execute_batch(ddl).map_err(|e| e.to_string())?;
             }
+        }
+    }
+    // v3 → v4 已在历史版本完成；v4 → v5：收藏夹成员支持手动排序 + 旧红心收藏迁入默认收藏夹
+    if version < 5 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(collection_videos)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        if !cols.iter().any(|c| c == "position") {
+            conn.execute_batch("ALTER TABLE collection_videos ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+                .map_err(|e| e.to_string())?;
+        }
+        // 红心收藏（favorite=1）一次性迁入默认收藏夹「我的收藏」：
+        // 该夹已存在（含软删）时 INSERT OR IGNORE 得 0 变更，绝不动用户已有的同名夹
+        let created = conn.execute(
+            "INSERT OR IGNORE INTO collections (name, kind) VALUES ('我的收藏', 'custom')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        if created > 0 {
+            let cid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at, position)
+                 SELECT ?1, id, ?2, ROW_NUMBER() OVER (ORDER BY id) - 1 FROM videos WHERE favorite=1",
+                params![cid, now_secs()],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     if version < SCHEMA_VERSION {
@@ -463,12 +492,24 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         where_parts.push("EXISTS (SELECT 1 FROM video_tags vt JOIN tags t ON t.id=vt.tag_id WHERE vt.video_id=v.id AND t.name=? )".into());
         binds.push(Box::new(tag.to_string()));
     }
+    let mut collection_name: Option<String> = None;
     if let Some(coll) = q.collection.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         where_parts.push("EXISTS (SELECT 1 FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.name=? AND c.deleted_at=0 )".into());
         binds.push(Box::new(coll.to_string()));
+        collection_name = Some(coll.to_string());
     }
     let where_sql = where_parts.join(" AND ");
+    // manual 排序 = 收藏夹内拖拽位次；ORDER BY 的绑定参数要排在 WHERE 参数之后、LIMIT 之前
+    let mut order_binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let order = match q.sort.as_deref().unwrap_or("added") {
+        "manual" => {
+            if let Some(name) = collection_name.clone() {
+                order_binds.push(Box::new(name));
+                "(SELECT cv2.position FROM collection_videos cv2 JOIN collections c2 ON c2.id=cv2.collection_id WHERE cv2.video_id=v.id AND c2.name=? AND c2.deleted_at=0) ASC, v.added_at DESC"
+            } else {
+                "v.added_at DESC"
+            }
+        }
         "title" => "v.file_name COLLATE NOCASE ASC",
         "size" => "v.size_bytes DESC",
         "watched" => "v.last_watched_at DESC",
@@ -488,6 +529,7 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         .map_err(|e| e.to_string())?;
     let offset = (page - 1) * page_size;
     let mut page_binds = binds;
+    page_binds.extend(order_binds);
     page_binds.push(Box::new(page_size as i64));
     page_binds.push(Box::new(offset as i64));
     let page_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -918,7 +960,8 @@ pub fn set_collection_video(
     }
     if add {
         conn.execute(
-            "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at) VALUES (?1,?2,?3)",
+            "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at, position)
+             VALUES (?1, ?2, ?3, COALESCE((SELECT MAX(position)+1 FROM collection_videos WHERE collection_id=?1), 0))",
             params![collection_id, video_id, now_secs()],
         )
         .map_err(|e| e.to_string())?;
@@ -940,6 +983,53 @@ pub fn collection_id_by_name(conn: &Connection, name: &str) -> Result<i64, Strin
         |r| r.get(0),
     )
     .map_err(|e| format!("目录「{name}」不存在: {e}"))
+}
+
+/// 侧栏收藏夹拖拽排序：按前端给出的完整 id 顺序落 sort_order。
+pub fn reorder_collections(conn: &Connection, ids: &[i64]) -> Result<(), String> {
+    for (idx, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE collections SET sort_order=?2 WHERE id=?1",
+            params![id, idx as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 收藏夹内视频拖拽排序。前端只传当前可见子集的新顺序：
+/// 未出现在子集里的成员整体后移 subset 长度（保持原有相对次序），避免位次冲突。
+pub fn reorder_collection_videos(
+    conn: &Connection,
+    collection_id: i64,
+    video_ids: &[i64],
+) -> Result<(), String> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM collections WHERE id=?1 AND deleted_at=0",
+            params![collection_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if exists.is_none() {
+        return Err("收藏夹不存在或已删除".into());
+    }
+    let shift = video_ids.len() as i64;
+    conn.execute(
+        "UPDATE collection_videos SET position=position+?2
+         WHERE collection_id=?1 AND video_id NOT IN (SELECT value FROM json_each(?3))",
+        params![collection_id, shift, serde_json::to_string(video_ids).map_err(|e| e.to_string())?],
+    )
+    .map_err(|e| e.to_string())?;
+    for (idx, vid) in video_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE collection_videos SET position=?3 WHERE collection_id=?1 AND video_id=?2",
+            params![collection_id, vid, idx as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn stats(conn: &Connection) -> Result<Stats, String> {
@@ -1651,6 +1741,162 @@ mod tests {
         assert_eq!(item.cover, "");
         set_cover(&ctx.conn, 1, "K:/covers/old.jpg").unwrap();
         assert_eq!(get_video(&ctx.conn, 1).unwrap().cover, "K:/covers/old.jpg");
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// v4 老库打开：collection_videos 补 position 列；红心收藏一次性迁入「我的收藏」；
+    /// 已有同名夹（哪怕软删）绝不被复活或塞入
+    #[test]
+    fn v4_library_gains_position_and_migrates_favorites() {
+        let root = std::env::temp_dir().join(format!(
+            "vv-mig5-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let vault = LibraryContext::vault_dir(&root);
+        fs::create_dir_all(&vault).unwrap();
+        {
+            let conn = Connection::open(vault.join("vault.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE videos (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   path TEXT NOT NULL, file_name TEXT NOT NULL, container TEXT NOT NULL DEFAULT '',
+                   size_bytes INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0,
+                   duration_sec REAL NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0,
+                   height INTEGER NOT NULL DEFAULT 0, codec_video TEXT NOT NULL DEFAULT '',
+                   codec_audio TEXT NOT NULL DEFAULT '', entry_index INTEGER NOT NULL DEFAULT 0,
+                   entry_count INTEGER NOT NULL DEFAULT 1, added_at INTEGER NOT NULL DEFAULT 0,
+                   last_watched_at INTEGER NOT NULL DEFAULT 0, watch_count INTEGER NOT NULL DEFAULT 0,
+                   progress_sec REAL NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0,
+                   rating INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
+                   favorite INTEGER NOT NULL DEFAULT 0, trashed INTEGER NOT NULL DEFAULT 0,
+                   contact_sheet TEXT NOT NULL DEFAULT '', tag_text TEXT NOT NULL DEFAULT '',
+                   UNIQUE(path, entry_index));
+                 INSERT INTO videos (path, file_name, favorite) VALUES ('K:/a.mp4','a.mp4',1),('K:/b.mp4','b.mp4',0),('K:/c.mp4','c.mp4',1);
+                 CREATE TABLE collections (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'custom',
+                   created_at INTEGER NOT NULL DEFAULT 0, UNIQUE(name, kind));
+                 INSERT INTO collections (name, kind) VALUES ('待看','system'),('已有夹','custom');
+                 CREATE TABLE collection_videos (
+                   collection_id INTEGER NOT NULL, video_id INTEGER NOT NULL,
+                   added_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (collection_id, video_id));
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let ctx = open_library(&root).expect("v4 老库应能迁移");
+        let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // 红心两条应已进入「我的收藏」，且带顺序位次；非红心的 b 不在
+        let fav_id: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM collections WHERE name='我的收藏'", [], |r| r.get(0))
+            .unwrap();
+        let members: Vec<(i64, i64)> = ctx
+            .conn
+            .prepare("SELECT video_id, position FROM collection_videos WHERE collection_id=?1 ORDER BY position")
+            .unwrap()
+            .query_map(params![fav_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(members.len(), 2, "favorite=1 的两条应迁入");
+        assert_eq!(members[0].1, 0, "迁移位次从 0 开始");
+        let names: Vec<String> = members
+            .iter()
+            .map(|(vid, _)| {
+                ctx.conn
+                    .query_row("SELECT file_name FROM videos WHERE id=?1", params![vid], |r| r.get(0))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.mp4", "c.mp4"], "按 id 顺序迁移");
+
+        // 再开一次库：不重复迁移（INSERT OR IGNORE 幂等）
+        drop(ctx);
+        let ctx2 = open_library(&root).unwrap();
+        let n: i64 = ctx2
+            .conn
+            .query_row("SELECT COUNT(*) FROM collection_videos WHERE collection_id=?1", params![fav_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "重复打开不得再次迁移");
+
+        drop(ctx2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 夹内拖拽排序：子集重排 + 未入子集成员整体后移保序；manual 查询按位次返回
+    #[test]
+    fn reorder_collection_videos_normalizes_positions() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("K:/1.mp4", 0)).unwrap();
+        upsert_video(&ctx.conn, &rec("K:/2.mp4", 0)).unwrap();
+        upsert_video(&ctx.conn, &rec("K:/3.mp4", 0)).unwrap();
+        upsert_video(&ctx.conn, &rec("K:/4.mp4", 0)).unwrap();
+        let ids: Vec<i64> = (1..=4)
+            .map(|i| {
+                ctx.conn
+                    .query_row("SELECT id FROM videos WHERE path=?1", params![format!("K:/{i}.mp4")], |r| r.get(0))
+                    .unwrap()
+            })
+            .collect();
+        let coll = create_collection(&ctx.conn, "片单", "").unwrap();
+        for vid in &ids {
+            set_collection_video(&ctx.conn, coll, *vid, true).unwrap();
+        }
+
+        // 初始位次 = 加入顺序 0..3；把 [3号, 1号] 拖到最前
+        reorder_collection_videos(&ctx.conn, coll, &[ids[2], ids[0]]).unwrap();
+        let order: Vec<i64> = ctx
+            .conn
+            .prepare(
+                "SELECT cv.video_id FROM collection_videos cv WHERE cv.collection_id=?1 ORDER BY cv.position",
+            )
+            .unwrap()
+            .query_map(params![coll], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(order, vec![ids[2], ids[0], ids[1], ids[3]], "子集置顶，未入子集的 2、4 号保序后移");
+
+        // manual 查询按位次返回
+        let coll_name = "片单";
+        let page = query_videos(
+            &ctx.conn,
+            &VideoQuery { collection: Some(coll_name.into()), sort: Some("manual".into()), ..Default::default() },
+        )
+        .unwrap();
+        let got: Vec<i64> = page.items.iter().map(|v| v.id).collect();
+        assert_eq!(got, vec![ids[2], ids[0], ids[1], ids[3]]);
+
+        // 新追加成员排到夹尾（位次 = MAX+1）
+        upsert_video(&ctx.conn, &rec("K:/5.mp4", 0)).unwrap();
+        let vid5: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path='K:/5.mp4'", [], |r| r.get(0))
+            .unwrap();
+        set_collection_video(&ctx.conn, coll, vid5, true).unwrap();
+        let pos5: i64 = ctx
+            .conn
+            .query_row(
+                "SELECT position FROM collection_videos WHERE collection_id=?1 AND video_id=?2",
+                params![coll, vid5],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pos5, 6, "位次稀疏（子集重排后 2/4 号后移到 3/5），新成员 MAX+1=6 排到末尾");
+
+        // 侧栏收藏夹顺序
+        reorder_collections(&ctx.conn, &[coll, 1]).unwrap();
+        let so: (i64, i64) = (
+            ctx.conn.query_row("SELECT sort_order FROM collections WHERE id=?1", params![coll], |r| r.get(0)).unwrap(),
+            ctx.conn.query_row("SELECT sort_order FROM collections WHERE id=1", [], |r| r.get(0)).unwrap(),
+        );
+        assert_eq!(so, (0, 1));
 
         drop(ctx);
         let _ = fs::remove_dir_all(&root);

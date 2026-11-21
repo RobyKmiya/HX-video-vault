@@ -57,6 +57,11 @@ export const api = {
   createCollection: (name: string, group = "") => invoke<number>("create_collection", { name, group }),
   renameCollection: (id: number, name: string) => invoke<void>("rename_collection", { id, name }),
   setCollectionGroup: (id: number, group: string) => invoke<void>("set_collection_group", { id, group }),
+  /** 侧栏收藏夹拖拽排序：传拖完后的完整 id 顺序 */
+  reorderCollections: (ids: number[]) => invoke<void>("reorder_collections", { ids }),
+  /** 收藏夹内视频拖拽排序：传可见子集的新顺序，未入子集成员整体后移保序 */
+  reorderCollectionVideos: (collectionId: number, videoIds: number[]) =>
+    invoke<void>("reorder_collection_videos", { collectionId, videoIds }),
   deleteCollection: (id: number, purge = false) => invoke<void>("delete_collection", { id, purge }),
   restoreCollection: (id: number) => invoke<void>("restore_collection", { id }),
   /** 目录 id 或名字都能用（详情页拿 id，旧调用点写名字） */

@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import type { DragEvent, MouseEvent } from "react";
 import { Icon } from "./Icons";
 import { useCoverSrc } from "../cover";
 import { formatBytes, formatDuration, relativeTime, thumbRatio } from "../format";
@@ -10,9 +10,19 @@ interface Props {
   onOpen: (v: VideoItem, edit: boolean) => void;
   onPlay: (v: VideoItem) => void;
   onSelect: (v: VideoItem, ev: MouseEvent) => void;
+  /** 收藏夹视图手动排序时的拖拽能力（缺省 = 不可拖） */
+  dragEnabled?: boolean;
+  onDragStart?: (v: VideoItem, e: DragEvent<HTMLElement>) => void;
+  onDragOver?: (v: VideoItem, e: DragEvent<HTMLElement>) => void;
+  onDragLeave?: (e: DragEvent<HTMLElement>) => void;
+  onDrop?: (v: VideoItem, e: DragEvent<HTMLElement>) => void;
+  onDragEnd?: (e: DragEvent<HTMLElement>) => void;
 }
 
-export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) {
+export function VideoCard({
+  video, selected, onOpen, onPlay, onSelect,
+  dragEnabled, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
+}: Props) {
   const progress = video.duration_sec > 0
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
@@ -28,6 +38,12 @@ export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) 
       data-video-id={video.id}
       onClick={(e) => onSelect(video, e)}
       onDoubleClick={() => onOpen(video, false)}
+      draggable={dragEnabled || undefined}
+      onDragStart={(e) => onDragStart?.(video, e)}
+      onDragOver={(e) => onDragOver?.(video, e)}
+      onDragLeave={(e) => onDragLeave?.(e)}
+      onDrop={(e) => onDrop?.(video, e)}
+      onDragEnd={(e) => onDragEnd?.(e)}
     >
       <div className={`card-thumb ${portrait ? "portrait" : ""}`} style={{ aspectRatio: ratio }} onClick={() => onOpen(video, false)}>
         {cover ? (

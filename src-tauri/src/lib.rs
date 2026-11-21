@@ -1162,6 +1162,28 @@ fn clear_cover(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     db::clear_cover(&lib.conn, id)
 }
 
+// ---------- 收藏夹排序 ----------
+
+/// 侧栏收藏夹拖拽排序：前端给出拖完后的完整 id 顺序。
+#[tauri::command]
+fn reorder_collections(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    db::reorder_collections(&lib.conn, &ids)
+}
+
+/// 收藏夹内视频拖拽排序：前端给出可见子集的新顺序，未在子集里的成员整体后移保序。
+#[tauri::command]
+fn reorder_collection_videos(
+    state: State<'_, AppState>,
+    collection_id: i64,
+    video_ids: Vec<i64>,
+) -> Result<(), String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    db::reorder_collection_videos(&lib.conn, collection_id, &video_ids)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1225,6 +1247,8 @@ pub fn run() {
             set_cover_from_mpv,
             set_cover_from_time,
             clear_cover,
+            reorder_collections,
+            reorder_collection_videos,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");
