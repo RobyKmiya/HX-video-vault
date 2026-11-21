@@ -175,6 +175,24 @@ export default function App() {
     suppressNavRef.current = false;
   };
   useEffect(() => { navFnRef.current = { back: navBack, forward: navForward }; });
+  // 鼠标侧键（主页）：返回/前进在导航历史上移动；播放页/面板/详情有各自语义，不在这里抢
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return;
+      e.preventDefault();
+      if (player || statsOpen || tagsOpen || downloadOpen || editOpen || detailId || settingsOpen || sheetOpen || collectionsOpen) return;
+      if (e.button === 3) navFnRef.current.back(); else navFnRef.current.forward();
+    };
+    const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("auxclick", swallow);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("auxclick", swallow);
+    };
+  }, [player, statsOpen, tagsOpen, downloadOpen, editOpen, detailId, settingsOpen, sheetOpen, collectionsOpen]);
 
   const enterFolder = useCallback((path: string[]) => {
     pushLoc();
@@ -541,24 +559,6 @@ export default function App() {
 
   const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
 
-  // 鼠标侧键（主页）：返回/前进在导航历史上移动；播放页/面板/详情有各自语义，不在这里抢
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (e.button !== 3 && e.button !== 4) return;
-      const t = e.target as HTMLElement;
-      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return;
-      e.preventDefault();
-      if (player || showPanel || detailId || settingsOpen || sheetOpen || collectionsOpen) return;
-      if (e.button === 3) navFnRef.current.back(); else navFnRef.current.forward();
-    };
-    const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("auxclick", swallow);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("auxclick", swallow);
-    };
-  }, [player, showPanel, detailId, settingsOpen, sheetOpen, collectionsOpen]);
 
   return (
     <div className="app-shell">
