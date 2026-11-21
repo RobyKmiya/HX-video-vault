@@ -84,6 +84,64 @@ function run(cmd, args, cwd = ROOT) {
   execFileSync(cmd, args, { cwd, stdio: 'inherit', shell: false });
 }
 
+/**
+ * 桌面快捷方式防呆（管理员规矩：每次发版后桌面快捷方式必须指向最新版）：
+ * 扫描用户桌面 + 公共桌面上所有指向 video-vault.exe 的 .lnk，
+ * 目标不是最新安装位的就地改写；一个都没有就在用户桌面补建一个。
+ * 用 WScript.Shell COM 写 .lnk，PowerShell 脚本落临时文件（UTF-8 BOM 防 Unicode 路径乱码）。
+ */
+function refreshShortcuts() {
+  const ps = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = '${INSTALLED_EXE}'
+$installDir = '${INSTALL_DIR}'
+$sh = New-Object -ComObject WScript.Shell
+$dirs = @(
+  (Join-Path $env:USERPROFILE 'Desktop'),
+  'C:\Users\Public\Desktop'
+)
+$found = $false
+foreach ($d in $dirs) {
+  if (-not (Test-Path $d)) { continue }
+  Get-ChildItem -Path (Join-Path $d '*.lnk') -ErrorAction SilentlyContinue | ForEach-Object {
+    $s = $sh.CreateShortcut($_.FullName)
+    if ($s.TargetPath -match 'video-vault\.exe$') {
+      if ($s.TargetPath -ne $target) {
+        $s.TargetPath = $target
+        $s.WorkingDirectory = $installDir
+        $s.Save()
+        Write-Output ("  FIXED " + $_.FullName)
+        Write-Output ("        " + $s.TargetPath)
+      } else {
+        Write-Output ("  OK " + $_.FullName + " -> " + $s.TargetPath)
+      }
+      $found = $true
+    }
+  }
+}
+if (-not $found) {
+  $lnkPath = Join-Path $env:USERPROFILE 'Desktop\${PRODUCT}.lnk'
+  $s = $sh.CreateShortcut($lnkPath)
+  $s.TargetPath = $target
+  $s.WorkingDirectory = $installDir
+  $s.Save()
+  Write-Output ("  CREATED " + $lnkPath + " -> " + $target)
+}
+`;
+  const tmp = path.join(os.tmpdir(), 'vv-refresh-shortcuts.ps1');
+  fs.writeFileSync(tmp, '\uFEFF' + ps, 'utf8');
+  execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmp}"`, { stdio: 'inherit' });
+  fs.rmSync(tmp, { force: true });
+}
+
+/** 读安装位 exe 的 FileVersion（发布流程验证的硬标准，防「装了旧版」体感纠纷）。 */
+function installedFileVersion() {
+  return execSync(
+    `powershell -NoProfile -Command "(Get-Item -LiteralPath '${INSTALLED_EXE}').VersionInfo.FileVersion"`,
+    { encoding: 'utf8' },
+  ).trim();
+}
+
 function runNpm(script) {
   // Windows 上 npm 是 .cmd，Node 直接 spawnSync 会 EINVAL，必须走 shell
   if (process.platform === 'win32') {
@@ -152,6 +210,7 @@ if (doInstall) {
     if (!fs.existsSync(INSTALLED_EXE)) throw new Error(`安装后找不到 exe：${INSTALLED_EXE}`);
     const stat = fs.statSync(INSTALLED_EXE);
     ok(`exe 时间戳 ${stat.mtime.toLocaleString()}`);
+    ok(`安装位 FileVersion = ${installedFileVersion()}`);
     if (readVersion() !== next) throw new Error('版本号校验不一致');
     ok(`版本号一致：${next}`);
     try {
@@ -162,6 +221,9 @@ if (doInstall) {
       warn('exe 仍被占用，可能影匣还在运行');
     }
   });
+  if (doInstall) {
+    step('桌面快捷方式校验/更新（指向最新安装位）', refreshShortcuts);
+  }
 } else {
   warn('已跳过安装（--no-install）');
 }

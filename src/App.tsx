@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { Icon } from "./components/Icons";
 import { Sidebar, type ViewKey } from "./components/Sidebar";
 import { VideoCard } from "./components/VideoCard";
@@ -683,6 +684,11 @@ function SettingsModal({
   notify: (m: string) => void;
 }) {
   const [draft, setDraft] = useState<Settings>(settings);
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    // 界面内可自查版本号：更新是否生效一目了然
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
   const save = async () => {
     try {
       await api.updateSettings(draft);
@@ -694,7 +700,7 @@ function SettingsModal({
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-head"><div><h1>设置</h1><p>本地配置，不上传</p></div>
+        <div className="panel-head"><div><h1>设置</h1><p>本地配置，不上传{appVersion ? ` · 影匣 v${appVersion}` : ""}</p></div>
           <button className="icon-btn" onClick={onClose}><Icon name="x" size={18} /></button></div>
         <div className="modal-body">
           <div className="field">
