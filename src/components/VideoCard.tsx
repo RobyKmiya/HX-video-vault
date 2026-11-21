@@ -1,6 +1,6 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MouseEvent } from "react";
 import { Icon } from "./Icons";
+import { useCoverSrc } from "../cover";
 import { formatBytes, formatDuration, relativeTime, thumbRatio } from "../format";
 import type { VideoItem } from "../types";
 
@@ -16,7 +16,8 @@ export function VideoCard({ video, selected, onOpen, onPlay, onSelect }: Props) 
   const progress = video.duration_sec > 0
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
-  const cover = video.contact_sheet ? convertFileSrc(video.contact_sheet) : "";
+  // 自选封面 > 接触表 > 中间帧兜底（后端懒生成），失败回占位图
+  const cover = useCoverSrc(video);
   const isArchive = video.entry_index > 0;
   const ratio = thumbRatio(video.width, video.height);
   const portrait = video.width > 0 && video.height > video.width;

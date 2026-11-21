@@ -138,6 +138,42 @@ pub(crate) fn parse_fraction(s: &str) -> Option<f64> {
     }
 }
 
+/// 解码 canvas.toDataURL 产出的 base64 data URL（仅限 image/*）。
+/// 不为此引 base64 依赖，自带一个最小解码器（只解码、不编码）。
+pub fn decode_data_url(s: &str) -> Result<Vec<u8>, String> {
+    let rest = s.strip_prefix("data:").ok_or("不是 data URL")?;
+    let (meta, data) = rest.split_once(',').ok_or("data URL 缺少逗号")?;
+    if !meta.contains("base64") {
+        return Err("仅支持 base64 编码的 data URL".into());
+    }
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut nbits = 0;
+    for &c in data.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        let v = val(c).ok_or("data URL 含非法 base64 字符")?;
+        acc = (acc << 6) | v;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push(((acc >> nbits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
 /// 用 ffprobe 取时长/分辨率/编码。失败不阻断入库（返回空元数据）。
 pub fn probe(path: &Path) -> MediaMeta {
     let Some(ffprobe) = find_tool("ffprobe") else {
@@ -361,5 +397,101 @@ pub fn contact_sheet(source: &Path, out: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err("ffmpeg 生成预览失败（可能是视频过短或格式不支持）".into())
+    }
+}
+
+/// 抽单帧当封面：默认取视频中间帧（输入侧 seek + 默认 accurate_seek，逐帧精确落点）。
+/// 压缩包条目由调用方先 resolve 出真实文件再传进来。
+pub fn extract_frame(source: &Path, at_sec: f64, out: &Path) -> Result<(), String> {
+    let Some(ffmpeg) = find_tool("ffmpeg") else {
+        return Err("未找到 ffmpeg，请在设置里指定路径".into());
+    };
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let ss = format!("{at_sec:.3}");
+    let status = crate::proc::quiet(ffmpeg)
+        .args([
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", &ss,
+            "-i", &source.to_string_lossy(),
+            "-frames:v", "1",
+            // 480 宽足够卡片与详情用，避免 4K 原帧一张几 MB
+            "-vf", "scale=480:-2:flags=bicubic",
+            "-q:v", "3",
+            &out.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() && out.is_file() {
+        Ok(())
+    } else {
+        Err("ffmpeg 抽帧失败（可能是时间点超出时长或格式不支持）".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_data_url_roundtrip_known_vectors() {
+        // "Hello" 的 base64
+        let out = decode_data_url("data:image/jpeg;base64,SGVsbG8=").unwrap();
+        assert_eq!(out, b"Hello");
+        // 带 padding 的 "a"
+        let out = decode_data_url("data:image/png;base64,YQ==").unwrap();
+        assert_eq!(out, b"a");
+        // 1×1 白色 JPEG 的真实 data URL 头几字节（FF D8 FF = JPEG SOI）
+        let out = decode_data_url("data:image/jpeg;base64,/9j/4AAQSkZJRg==").unwrap();
+        assert_eq!(&out[..3], &[0xFF, 0xD8, 0xFF]);
+
+        assert!(decode_data_url("http://x/y.png").is_err(), "非 data URL 应拒绝");
+        assert!(decode_data_url("data:text/plain,raw").is_err(), "非 base64 应拒绝");
+        assert!(decode_data_url("data:image/jpeg;base64,@@@").is_err(), "非法字符应拒绝");
+    }
+
+    /// 真实端到端：ffmpeg 造 2 秒测试片 → 抽中间帧，产物应是有效 JPEG。
+    #[test]
+    fn real_ffmpeg_extracts_middle_frame() {
+        let Some(ffmpeg) = find_tool("ffmpeg") else {
+            eprintln!("SKIP: 本机没有 ffmpeg，跳过抽帧端到端");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "vv-cover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("a.mp4");
+        let st = crate::proc::quiet(&ffmpeg)
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                &src.to_string_lossy(),
+            ])
+            .status()
+            .expect("ffmpeg 造测试片失败");
+        assert!(st.success());
+
+        let meta = probe(&src);
+        assert!(meta.duration_sec > 1.0, "测试片时长应约 2 秒");
+        let out = dir.join("mid.jpg");
+        extract_frame(&src, meta.duration_sec / 2.0, &out).unwrap();
+        assert!(out.is_file());
+        let bytes = fs::read(&out).unwrap();
+        assert!(bytes.len() > 500, "JPEG 应有实质内容，实测 {} 字节", bytes.len());
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "应为 JPEG（SOI 标记）");
+
+        // 超界时间点应报错而不是留半截文件
+        let bad = dir.join("bad.jpg");
+        assert!(extract_frame(&src, 999.0, &bad).is_err());
+
+        fs::remove_dir_all(dir).ok();
     }
 }

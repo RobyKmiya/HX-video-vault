@@ -3,6 +3,7 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { api } from "../api";
+import { bustCover } from "../cover";
 import { formatDuration } from "../format";
 import { DetailDrawer } from "./DetailDrawer";
 import type { Collection, PlaybackInfo, Tag, VideoItem } from "../types";
@@ -416,6 +417,40 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     a.click();
   };
 
+  // 把当前画面设为封面：builtin 直接抓 <video> 当前帧（精确到暂停帧）；
+  // mpv 让 mpv 自己 screenshot-to-file（同样精确），写完轮询登记。
+  // external（VLC/缺失）模式下控制条整条隐藏，天然没有这个入口。
+  const setCover = async () => {
+    try {
+      if (isMpv) {
+        const path = await api.mpvCoverPath(info.video.id);
+        await api.mpvCommand("screenshot", path);
+        // IPC 是发完即忘，mpv 写文件有延迟；登记失败就轮询等它落地
+        for (let i = 0; ; i++) {
+          try { await api.setCoverFromMpv(info.video.id, path); break; }
+          catch (e) {
+            if (i >= 30) throw e;
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        }
+      } else {
+        const v = videoRef.current;
+        if (!v || !v.videoWidth) { showHud("画面还没就绪"); return; }
+        const canvas = document.createElement("canvas");
+        canvas.width = v.videoWidth;
+        canvas.height = v.videoHeight;
+        canvas.getContext("2d")?.drawImage(v, 0, 0);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        await api.setCoverImage(info.video.id, dataUrl);
+      }
+      bustCover(info.video.id);
+      showHud("已设为封面");
+      void refreshDetail();
+    } catch (e) {
+      onError(`设封面失败：${String(e)}`);
+    }
+  };
+
   const onEnded = () => {
     void api.watch({ id: info.video.id, progress_sec: duration, duration_sec: duration, completed: true });
     if (prefs.loopOne) {
@@ -554,6 +589,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
               }}
             />
             <button className="player-round" onClick={snapshot} title="截图"><Icon name="camera" size={18} /></button>
+            <button className="player-round" onClick={() => void setCover()} title="把当前画面设为封面（暂停在喜欢的帧再按）"><Icon name="image" size={18} /></button>
 
             <div className="player-pop-anchor">
               <button

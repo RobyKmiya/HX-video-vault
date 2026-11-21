@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
+import { bustCover, useCoverSrc } from "../cover";
 import { api } from "../api";
 import { formatBytes, formatDate, formatDuration, relativeTime, thumbRatio } from "../format";
 import type { Collection, Tag, VideoItem } from "../types";
@@ -131,7 +131,7 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
     }
   };
 
-  const cover = video.contact_sheet ? convertFileSrc(video.contact_sheet) : "";
+  const cover = useCoverSrc(video);
   const coverRatio = thumbRatio(video.width, video.height);
   const watchedPercent = video.duration_sec > 0
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
@@ -230,6 +230,24 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
             <Icon name="camera" size={15} />{busy ? "生成中…" : "预览图"}
           </button>
         </div>
+        {video.cover && (
+          <div className="detail-section">
+            <button
+              className="btn full"
+              onClick={async () => {
+                try {
+                  await api.clearCover(video.id);
+                  bustCover(video.id);
+                  onChanged();
+                } catch (e) { onError(String(e)); }
+              }}
+              title="撤掉自选封面，回到接触表 / 中间帧"
+            >
+              <Icon name="refresh" size={15} />恢复默认封面
+            </button>
+            <p className="hint">当前封面来自播放页挑选的暂停帧。播放到喜欢的画面暂停，点控制条上的「设为封面」就能换。</p>
+          </div>
+        )}
 
         <div className="detail-section">
           <div className="section-title">评分与状态</div>

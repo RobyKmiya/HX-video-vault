@@ -92,4 +92,13 @@ export const api = {
   cancelEdit: () => invoke<void>("cancel_edit"),
   pickVideoFiles: () => invoke<string[]>("pick_video_files"),
   probeMedia: (path: string) => invoke<MediaMeta>("probe_media", { path }),
+  /** 最佳封面路径：自选封面 > 中间帧兜底（懒生成）；卡片仅在两者都缺时调用 */
+  videoCover: (id: number) => invoke<string>("video_cover", { id }),
+  /** 内置播放器把 canvas 截下的当前帧（JPEG data URL）设为封面 */
+  setCoverImage: (id: number, dataUrl: string) => invoke<void>("set_cover_image", { id, dataUrl }),
+  /** mpv screenshot-to-file 应写的目标绝对路径 */
+  mpvCoverPath: (id: number) => invoke<string>("mpv_cover_path", { id }),
+  /** mpv 已把当前帧写到目标路径后登记为封面 */
+  setCoverFromMpv: (id: number, path: string) => invoke<void>("set_cover_from_mpv", { id, path }),
+  clearCover: (id: number) => invoke<void>("clear_cover", { id }),
 };

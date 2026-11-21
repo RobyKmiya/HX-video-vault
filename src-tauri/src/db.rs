@@ -9,7 +9,7 @@ use crate::models::{
     VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -110,13 +110,15 @@ fn map_video(row: &Row<'_>) -> rusqlite::Result<VideoItem> {
         favorite: row.get::<_, i64>("favorite")? != 0,
         trashed: row.get::<_, i64>("trashed")? != 0,
         contact_sheet: row.get("contact_sheet")?,
+        // LEFT JOIN 没命中时是 NULL，走 Option 再落成空串
+        cover: row.get::<_, Option<String>>("cover")?.unwrap_or_default(),
         tag_text,
         tags,
         collections,
     })
 }
 
-const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, tag_text, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.deleted_at=0) AS collections";
+const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, tag_text, (SELECT path FROM video_covers vc WHERE vc.video_id = v.id) AS cover, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.deleted_at=0) AS collections";
 
 /// 打开（必要时创建）一个影匣库。库数据放在 <root>/.vault/vault.db，
 /// 与用户视频文件同盘但不混入媒体目录。
@@ -224,6 +226,12 @@ CREATE TABLE IF NOT EXISTS watch_history (
 );
 CREATE INDEX IF NOT EXISTS idx_wh_video ON watch_history(video_id);
 CREATE INDEX IF NOT EXISTS idx_wh_time ON watch_history(watched_at DESC);
+
+CREATE TABLE IF NOT EXISTS video_covers (
+  video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS download_tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -593,6 +601,30 @@ pub fn set_contact_sheet(conn: &Connection, id: i64, path: &str) -> Result<(), S
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 记录用户自选封面（优先于接触表展示）。同一条重复设置即覆盖。
+pub fn set_cover(conn: &Connection, id: i64, path: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO video_covers (video_id, path, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(video_id) DO UPDATE SET path=excluded.path, created_at=excluded.created_at",
+        params![id, path, now_secs()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 撤销自选封面，回到接触表 / 中间帧兜底。
+pub fn clear_cover(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM video_covers WHERE video_id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn get_cover_path(conn: &Connection, id: i64) -> Result<Option<String>, String> {
+    conn.query_row("SELECT path FROM video_covers WHERE video_id=?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())
 }
 
 /// 回填「见到才知道」的元数据。压缩包内条目在扫描时只读中央目录、不解压，
@@ -1527,5 +1559,100 @@ mod tests {
 
         drop(ctx);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// 自选封面：登记优先于接触表展示，撤销后回到空（接触表/中间帧兜底由上层决定）
+    #[test]
+    fn cover_set_clear_and_priority_in_query() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("K:/c.mp4", 0)).unwrap();
+        let id: i64 = ctx.conn.query_row("SELECT id FROM videos", [], |r| r.get(0)).unwrap();
+
+        // 初始：无自选封面
+        assert_eq!(get_cover_path(&ctx.conn, id).unwrap(), None);
+        let item = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(item.cover, "");
+
+        // 重复设置 = 覆盖，查询端直接带到 VideoItem
+        set_cover(&ctx.conn, id, "K:/covers/a.jpg").unwrap();
+        set_cover(&ctx.conn, id, "K:/covers/b.jpg").unwrap();
+        let item = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(item.cover, "K:/covers/b.jpg");
+        assert_eq!(get_cover_path(&ctx.conn, id).unwrap().as_deref(), Some("K:/covers/b.jpg"));
+
+        // 撤销后回到空
+        clear_cover(&ctx.conn, id).unwrap();
+        let item = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(item.cover, "");
+        assert_eq!(get_cover_path(&ctx.conn, id).unwrap(), None);
+
+        // contact_sheet 与 cover 互不干扰（预览图统计不受自选封面影响）
+        set_contact_sheet(&ctx.conn, id, "K:/sheets/c.jpg").unwrap();
+        set_cover(&ctx.conn, id, "K:/covers/c.jpg").unwrap();
+        let item = get_video(&ctx.conn, id).unwrap();
+        assert_eq!(item.contact_sheet, "K:/sheets/c.jpg");
+        assert_eq!(item.cover, "K:/covers/c.jpg");
+        assert_eq!(sheet_counts(&ctx.conn).unwrap(), (1, 1, 0));
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// v3 老库打开时补建 video_covers 表，查询端（带 cover 联查）照常工作
+    #[test]
+    fn v3_library_gains_covers_table_on_open() {
+        let root = std::env::temp_dir().join(format!(
+            "vv-mig4-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let vault = LibraryContext::vault_dir(&root);
+        fs::create_dir_all(&vault).unwrap();
+        {
+            let conn = Connection::open(vault.join("vault.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE videos (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   path TEXT NOT NULL,
+                   file_name TEXT NOT NULL,
+                   container TEXT NOT NULL DEFAULT '',
+                   size_bytes INTEGER NOT NULL DEFAULT 0,
+                   mtime INTEGER NOT NULL DEFAULT 0,
+                   duration_sec REAL NOT NULL DEFAULT 0,
+                   width INTEGER NOT NULL DEFAULT 0,
+                   height INTEGER NOT NULL DEFAULT 0,
+                   codec_video TEXT NOT NULL DEFAULT '',
+                   codec_audio TEXT NOT NULL DEFAULT '',
+                   entry_index INTEGER NOT NULL DEFAULT 0,
+                   entry_count INTEGER NOT NULL DEFAULT 1,
+                   added_at INTEGER NOT NULL DEFAULT 0,
+                   last_watched_at INTEGER NOT NULL DEFAULT 0,
+                   watch_count INTEGER NOT NULL DEFAULT 0,
+                   progress_sec REAL NOT NULL DEFAULT 0,
+                   completed INTEGER NOT NULL DEFAULT 0,
+                   rating INTEGER NOT NULL DEFAULT 0,
+                   note TEXT NOT NULL DEFAULT '',
+                   favorite INTEGER NOT NULL DEFAULT 0,
+                   trashed INTEGER NOT NULL DEFAULT 0,
+                   contact_sheet TEXT NOT NULL DEFAULT '',
+                   tag_text TEXT NOT NULL DEFAULT '',
+                   UNIQUE(path, entry_index));
+                 INSERT INTO videos (path, file_name) VALUES ('K:/old.mp4', 'old.mp4');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let ctx = open_library(&root).expect("v3 老库应能迁移");
+        let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let item = get_video(&ctx.conn, 1).unwrap();
+        assert_eq!(item.file_name, "old.mp4");
+        assert_eq!(item.cover, "");
+        set_cover(&ctx.conn, 1, "K:/covers/old.jpg").unwrap();
+        assert_eq!(get_video(&ctx.conn, 1).unwrap().cover, "K:/covers/old.jpg");
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
     }
 }

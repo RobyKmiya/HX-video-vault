@@ -30,6 +30,8 @@ pub struct VideoItem {
     pub trashed: bool,
     /// 接触表相对路径（真空白表示尚未生成）
     pub contact_sheet: String,
+    /// 用户自选封面路径（优先于接触表展示；空 = 未自选，回退接触表/中间帧）
+    pub cover: String,
     /// 冗余的「原文 + 译名」标签串，供搜索
     pub tag_text: String,
     pub tags: Vec<String>,

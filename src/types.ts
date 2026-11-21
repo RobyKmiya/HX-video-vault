@@ -22,6 +22,8 @@ export interface VideoItem {
   favorite: boolean;
   trashed: boolean;
   contact_sheet: string;
+  /** 用户自选封面路径（优先于接触表展示；空 = 未自选） */
+  cover: string;
   tag_text: string;
   tags: string[];
   collections: string[];
