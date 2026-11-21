@@ -499,24 +499,38 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         collection_name = Some(coll.to_string());
     }
     let where_sql = where_parts.join(" AND ");
-    // manual 排序 = 收藏夹内拖拽位次；ORDER BY 的绑定参数要排在 WHERE 参数之后、LIMIT 之前
+    // 排序键可带 - 前缀表示逆序（如 -added / -mtime / -title）；manual = 收藏夹内拖拽位次；
+    // ORDER BY 的绑定参数要排在 WHERE 参数之后、LIMIT 之前
+    // 无前缀 = 各键的既有默认方向（added/size/watched/count/duration/rating/mtime 新近在前，
+    // title/manual 升序）；- 前缀取反。老调用不传前缀，行为与历史版本一致。
+    let raw_sort = q.sort.as_deref().unwrap_or("added").to_string();
+    let default_desc = !matches!(raw_sort.trim_start_matches('-'), "title" | "manual");
+    let (key, desc) = match raw_sort.strip_prefix('-') {
+        Some(k) => (k.to_string(), !default_desc),
+        None => (raw_sort, default_desc),
+    };
     let mut order_binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let order = match q.sort.as_deref().unwrap_or("added") {
+    let order = match key.as_str() {
         "manual" => {
             if let Some(name) = collection_name.clone() {
                 order_binds.push(Box::new(name));
-                "(SELECT cv2.position FROM collection_videos cv2 JOIN collections c2 ON c2.id=cv2.collection_id WHERE cv2.video_id=v.id AND c2.name=? AND c2.deleted_at=0) ASC, v.added_at DESC"
+                format!(
+                    "(SELECT cv2.position FROM collection_videos cv2 JOIN collections c2 ON c2.id=cv2.collection_id WHERE cv2.video_id=v.id AND c2.name=? AND c2.deleted_at=0) {}, v.added_at {}",
+                    if desc { "DESC" } else { "ASC" },
+                    if desc { "DESC" } else { "ASC" }
+                )
             } else {
-                "v.added_at DESC"
+                format!("v.added_at {}", if desc { "DESC" } else { "ASC" })
             }
         }
-        "title" => "v.file_name COLLATE NOCASE ASC",
-        "size" => "v.size_bytes DESC",
-        "watched" => "v.last_watched_at DESC",
-        "count" => "v.watch_count DESC",
-        "duration" => "v.duration_sec DESC",
-        "rating" => "v.rating DESC",
-        _ => "v.added_at DESC",
+        "title" => format!("v.file_name COLLATE NOCASE {}", if desc { "DESC" } else { "ASC" }),
+        "size" => format!("v.size_bytes {}", if desc { "DESC" } else { "ASC" }),
+        "mtime" => format!("v.mtime {}", if desc { "DESC" } else { "ASC" }),
+        "watched" => format!("v.last_watched_at {}", if desc { "DESC" } else { "ASC" }),
+        "count" => format!("v.watch_count {}", if desc { "DESC" } else { "ASC" }),
+        "duration" => format!("v.duration_sec {}", if desc { "DESC" } else { "ASC" }),
+        "rating" => format!("v.rating {}", if desc { "DESC" } else { "ASC" }),
+        _ => format!("v.added_at {}", if desc { "DESC" } else { "ASC" }),
     };
     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
         binds.iter().map(|b| b.as_ref()).collect();
@@ -1173,6 +1187,17 @@ pub fn sync_folder_collections(
         }
     }
     Ok(synced)
+}
+
+/// 夹内全部成员 id（按位次）。
+pub fn collection_member_ids(conn: &Connection, collection_id: i64) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare("SELECT video_id FROM collection_videos WHERE collection_id=?1 ORDER BY position")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![collection_id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
 }
 
 /// 收藏夹内视频拖拽排序。前端只传当前可见子集的新顺序：
@@ -2004,6 +2029,44 @@ mod tests {
         assert_eq!(n, 2, "重复打开不得再次迁移");
 
         drop(ctx2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 排序方向：无前缀 = 各键既有默认方向（mtime/added 新近在前、title 升序），"-" 前缀取反。
+    /// 这条锁住「只加逆序开关、不悄悄改老行为」。
+    #[test]
+    fn sort_keys_and_reverse_direction() {
+        let (root, ctx) = temp_lib();
+        let mut a = rec("K:/a.mp4", 0);
+        a.file_name = "a.mp4".into();
+        a.mtime = 300;
+        let mut b = rec("K:/b.mp4", 0);
+        b.file_name = "b.mp4".into();
+        b.mtime = 100;
+        let mut c = rec("K:/c.mp4", 0);
+        c.file_name = "c.mp4".into();
+        c.mtime = 200;
+        upsert_video(&ctx.conn, &a).unwrap();
+        upsert_video(&ctx.conn, &b).unwrap();
+        upsert_video(&ctx.conn, &c).unwrap();
+
+        let names = |sort: &str| -> Vec<String> {
+            query_videos(&ctx.conn, &VideoQuery { sort: Some(sort.into()), ..Default::default() })
+                .unwrap()
+                .items
+                .iter()
+                .map(|v| v.file_name.clone())
+                .collect()
+        };
+        assert_eq!(names("mtime"), vec!["a.mp4", "c.mp4", "b.mp4"], "mtime 默认新近在前");
+        assert_eq!(names("-mtime"), vec!["b.mp4", "c.mp4", "a.mp4"], "-mtime 取反");
+        assert_eq!(names("title"), vec!["a.mp4", "b.mp4", "c.mp4"], "title 默认升序");
+        assert_eq!(names("-title"), vec!["c.mp4", "b.mp4", "a.mp4"], "-title 降序");
+        // added 三条同秒入库时次序不稳，只验证两个方向都能查通
+        assert_eq!(names("added").len(), 3);
+        assert_eq!(names("-added").len(), 3);
+
+        drop(ctx);
         let _ = fs::remove_dir_all(&root);
     }
 

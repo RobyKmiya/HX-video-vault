@@ -7,6 +7,7 @@ import type {
   EditSource,
   EditStatus,
   EngineInfo,
+  ImportStatus,
   LibraryInfo,
   MediaMeta,
   ResolveReport,
@@ -112,4 +113,11 @@ export const api = {
   /** 主页层级浏览：某层下的 auto 子文件夹卡（parent=null 取顶层） */
   listFolderChildren: (parent: string | null) =>
     invoke<FolderInfo[]>("list_folder_children", { parent }),
+  /** 拖拽导入：外部文件路径入队后台复制进区间夹，返回入队数 */
+  importVideos: (paths: string[]) => invoke<number>("import_videos", { paths }),
+  importStatus: () => invoke<ImportStatus>("import_status"),
+  cancelImport: () => invoke<void>("cancel_import"),
+  /** 文件夹视图手动刷新封面：只重置这个夹的缓存图（不全库慢扫），返回被重置的成员 id */
+  resetFolderCovers: (collectionId: number) =>
+    invoke<number[]>("reset_folder_covers", { collectionId }),
 };

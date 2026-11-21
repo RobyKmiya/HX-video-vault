@@ -133,6 +133,20 @@ export interface Settings {
   ffprobe_path: string | null;
   player_pref: string;
   mpv_path: string | null;
+  /** 拖拽导入根目录；空 = 库根下的 Supervideo（区间夹 0-199 / 200-399…，每夹 200 个） */
+  import_root?: string | null;
+}
+
+/** 拖拽导入队列现场（后端 import-progress 事件 / import_status 命令） */
+export interface ImportStatus {
+  running: boolean;
+  queue_total: number;
+  queue_done: number;
+  current_file: string;
+  current_done: number;
+  current_total: number;
+  failed: number;
+  last_error: string;
 }
 
 export interface DownloadTask {

@@ -6,7 +6,7 @@ type Name =
   | "settings" | "plus" | "x" | "down" | "left" | "right" | "refresh"
   | "volume" | "fullscreen" | "back" | "forward" | "camera" | "link"
   | "list" | "info" | "menu" | "filter" | "sparkle" | "external"
-  | "cut" | "merge" | "image";
+  | "cut" | "merge" | "image" | "sortDir";
 
 const PATHS: Record<Name, ReactElement> = {
   vault: <><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V6M15.5 12H18"/></>,
@@ -45,6 +45,7 @@ const PATHS: Record<Name, ReactElement> = {
   cut: <><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.3 7.7 20 19.5M8.3 16.3 20 4.5"/></>,
   merge: <><path d="M5 5v5a4 4 0 0 0 4 4h10"/><path d="M15 10l4 4-4 4"/><path d="M5 19v-3"/></>,
   image: <><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-4.5-4.5L10 18"/></>,
+  sortDir: <><path d="M7 20V5"/><path d="m4 8 3-3 3 3"/><path d="M17 4v15"/><path d="m14 16 3 3 3-3"/></>,
 };
 
 export function Icon({

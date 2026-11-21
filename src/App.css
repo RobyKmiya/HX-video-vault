@@ -571,3 +571,47 @@ h1, h2, h3, p { margin: 0; }
 .fav-create { display: flex; gap: 8px; margin-bottom: 10px; }
 .fav-create input { flex: 1; height: 32px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; outline: none; background: var(--surface-2); color: var(--text); }
 .fav-create input:focus { border-color: var(--accent); }
+
+/* ---- 排序方向开关 ---- */
+.sort-dir { display: grid; place-items: center; }
+.sort-dir svg { transition: transform .18s; }
+.sort-dir.rev { border-color: var(--accent); color: var(--accent); }
+.sort-dir.rev svg { transform: rotate(180deg); }
+.crumb-refresh { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
+
+/* ---- 拖拽导入：全窗投放提示（不吃鼠标事件，免得打断拖拽） ---- */
+.drop-veil {
+  position: fixed; inset: 0; z-index: 90; display: grid; place-items: center;
+  background: rgba(6, 10, 18, .62); pointer-events: none;
+}
+.drop-card {
+  display: grid; justify-items: center; gap: 8px; padding: 26px 38px;
+  border: 1.5px dashed var(--accent); border-radius: 16px; color: var(--text);
+  background: var(--surface); box-shadow: 0 14px 40px rgba(0, 0, 0, .38);
+}
+.drop-card b { font-size: 15px; }
+.drop-card span { font-size: 12.5px; color: var(--muted); }
+
+/* ---- 角落传输浮窗 ---- */
+.import-hud {
+  position: fixed; right: 18px; bottom: 18px; z-index: 95; width: 292px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+}
+.import-hud.done { border-color: var(--accent); }
+.import-hud-head { display: flex; align-items: center; gap: 7px; }
+.import-hud-icon { color: var(--accent); display: grid; place-items: center; }
+.import-hud-title { font-size: 12.5px; font-weight: 600; flex: 1; }
+.hud-x {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: 2px; border-radius: 6px; display: grid; place-items: center;
+}
+.hud-x:hover { background: var(--accent-soft); color: var(--text); }
+.import-hud-file { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.import-hud-bar { margin-top: 6px; height: 5px; border-radius: 99px; background: var(--surface-3); overflow: hidden; }
+.import-hud-bar span { display: block; height: 100%; background: var(--accent); transition: width .18s; }
+.import-hud-meta {
+  display: flex; justify-content: space-between; margin-top: 5px;
+  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.import-hud-err { margin-top: 6px; font-size: 11px; color: #ff9a8b; }

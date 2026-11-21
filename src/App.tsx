@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Icon } from "./components/Icons";
 import { Sidebar, type ViewKey } from "./components/Sidebar";
 import { VideoCard } from "./components/VideoCard";
@@ -12,10 +13,12 @@ import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { EditPanel } from "./components/EditPanel";
 import { api } from "./api";
+import { resetCovers } from "./cover";
 import { formatBytes } from "./format";
 import type {
   Collection,
   FolderInfo,
+  ImportStatus,
   LibraryInfo,
   PlaybackInfo,
   ScanProgress,
@@ -28,11 +31,12 @@ import type {
   VideoPage,
 } from "./types";
 
-/** 导航历史的一帧：主页结构导航（视图/文件夹/标签/收藏夹/排序） */
-type NavLoc = { view: ViewKey; folder: string[]; tag: string | null; coll: string | null; sort: string };
+/** 导航历史的一帧：主页结构导航（视图/文件夹/标签/收藏夹/排序+方向） */
+type NavLoc = { view: ViewKey; folder: string[]; tag: string | null; coll: string | null; sort: string; rev: boolean };
 
 const SORTS = [
   { key: "added", label: "最近加入" },
+  { key: "mtime", label: "文件修改时间" },
   { key: "watched", label: "最近观看" },
   { key: "title", label: "文件名" },
   { key: "size", label: "大小" },
@@ -61,6 +65,7 @@ export default function App() {
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [settings, setSettings] = useState<Settings>({
     library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto", mpv_path: null,
+    import_root: null,
   });
   const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -68,6 +73,9 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sort, setSort] = useState("added");
+  // 逆序开关：后端用 "-" 前缀表示取反（无前缀 = 各键默认方向）
+  const [sortRev, setSortRev] = useState(false);
+  const sortParam = sortRev ? `-${sort}` : sort;
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [activeCollection, setActiveCollection] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -100,6 +108,12 @@ export default function App() {
   const [folderPath, setFolderPath] = useState<string[]>([]);
   const [folders, setFolders] = useState<FolderInfo[]>([]);
   const [folderSort, setFolderSort] = useState<"name" | "count">("name");
+  // 手动刷新文件夹封面后自增：夹卡的 2×2 拼贴与卡片封面都靠它换版本号，绕开 WebView 图片缓存
+  const [folderTick, setFolderTick] = useState(0);
+  const [coverBusy, setCoverBusy] = useState(false);
+  // 拖拽导入：角落浮窗的现场状态（由后端 import-progress 事件驱动）
+  const [importer, setImporter] = useState<ImportStatus | null>(null);
+  const [dropHover, setDropHover] = useState(false);
   // 启动屏：真实分阶段进度（打开 → 元数据 → 影片墙 → 就绪），元数据与影片墙并行谁慢等谁
   const [booting, setBooting] = useState(true);
   const [bootStage, setBootStage] = useState(0);
@@ -109,6 +123,9 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const reloadRef = useRef<() => void>(() => {});
   const lastScanRefresh = useRef(0);
+  // 导入结束只处理一次（防同一批完成事件重复触发扫描）
+  const importFinishedRef = useRef(true);
+  const doScanRef = useRef<() => void>(() => {});
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -131,14 +148,14 @@ export default function App() {
     if (!ready || !info) return;
     const parent = folderPath.length ? folderPath.join(" › ") : null;
     api.listFolderChildren(parent).then(setFolders).catch(() => setFolders([]));
-  }, [ready, info, folderPath, collections]);
+  }, [ready, info, folderPath, collections, folderTick]);
 
   // 进入某层：文件夹路径、当前收藏夹与排序一并切换（auto 夹用拖拽位次）
   // 导航历史：结构导航（进夹/换视图/换标签/换收藏夹）都会压栈，侧键返回/前进在栈上移动
   const histRef = useRef<{ stack: NavLoc[]; idx: number }>({ stack: [], idx: -1 });
   const suppressNavRef = useRef(false);
   const navFnRef = useRef<{ back: () => void; forward: () => void }>({ back: () => {}, forward: () => {} });
-  const currentLoc = (): NavLoc => ({ view, folder: folderPath, tag: activeTag, coll: activeCollection, sort });
+  const currentLoc = (): NavLoc => ({ view, folder: folderPath, tag: activeTag, coll: activeCollection, sort, rev: sortRev });
   const pushLoc = () => {
     if (suppressNavRef.current) return;
     const h = histRef.current;
@@ -156,6 +173,7 @@ export default function App() {
     setActiveTag(loc.tag);
     setActiveCollection(loc.coll);
     setSort(loc.sort);
+    setSortRev(loc.rev);
     setSelected(new Set());
   };
   const navBack = () => {
@@ -203,9 +221,11 @@ export default function App() {
       setActiveTag(null);
       setView("all");
       setSort("manual");
+      setSortRev(false);
     } else {
       setActiveCollection(null);
       setSort("added");
+      setSortRev(false);
     }
   }, []);
 
@@ -215,7 +235,7 @@ export default function App() {
       const nextPage = reset ? 1 : page + 1;
       const result = await api.query({
         view, search: debouncedSearch || undefined, tag: activeTag ?? undefined,
-        collection: activeCollection ?? undefined, sort, page: nextPage, page_size: 48,
+        collection: activeCollection ?? undefined, sort: sortParam, page: nextPage, page_size: 48,
       });
       setPage(nextPage);
       setVideoPage((prev) => reset ? result : {
@@ -227,7 +247,7 @@ export default function App() {
       setLoading(false);
       if (reset) setBootGridDone(true);
     }
-  }, [view, debouncedSearch, activeTag, activeCollection, sort, page, notify]);
+  }, [view, debouncedSearch, activeTag, activeCollection, sort, sortParam, page, notify]);
 
   useEffect(() => {
     api.settings().then(([s, err, i]) => {
@@ -339,6 +359,60 @@ export default function App() {
     return () => { cancelled = true; unlisten?.(); };
   }, []);
 
+  // 拖拽导入：系统级文件拖放（Tauri 原生事件，给的是真实文件路径），松手即入传输队列
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void getCurrentWebview()
+      .onDragDropEvent((e) => {
+        const p = e.payload;
+        if (p.type === "enter" || p.type === "over") { setDropHover(true); return; }
+        if (p.type === "leave") { setDropHover(false); return; }
+        setDropHover(false);
+        if (!p.paths.length) return;
+        api.importVideos(p.paths)
+          .then((n) => {
+            if (n === 0) notify("没找到可导入的视频（支持 mp4/mkv/avi/ts/mov 等）；也可能已经在队列里了");
+            else notify(`${n} 个视频已进入传输队列`);
+          })
+          .catch((err) => notify(String(err)));
+      })
+      .then((fn) => { if (cancelled) fn(); else unlisten = fn; })
+      .catch((err) => notify(String(err)));
+    return () => { cancelled = true; unlisten?.(); };
+  }, [notify]);
+
+  // 导入进度：角落浮窗读这个事件；一批做完自动增量扫描，拖进来就能在影片墙看到
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<ImportStatus>("import-progress", (e) => {
+        const s = e.payload;
+        setImporter(s);
+        if (s.running) { importFinishedRef.current = false; return; }
+        if (s.queue_total === 0 || s.queue_done < s.queue_total) return;
+        if (importFinishedRef.current) return;
+        importFinishedRef.current = true;
+        const ok = s.queue_done - s.failed;
+        notify(s.failed > 0 ? `导入结束：成功 ${ok} 个，失败 ${s.failed} 个` : `导入完成：${ok} 个视频已就位`);
+        doScanRef.current();
+      }),
+    ).then((fn) => { if (cancelled) fn(); else unlisten = fn; }).catch(() => {});
+    // 窗口重载/刚打开时把现场捞回来：后台还在跑的话浮窗照样显示
+    api.importStatus()
+      .then((s) => { if (s.running && s.queue_total > 0) { setImporter(s); importFinishedRef.current = false; } })
+      .catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, [notify]);
+
+  // 做完且没失败时浮窗自己退场，别一直占角落
+  useEffect(() => {
+    if (!importer || importer.running || importer.failed > 0) return;
+    const t = window.setTimeout(() => setImporter(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [importer]);
+
   useEffect(() => {
     if (!ready || !info) return;
     void refreshSheetStatus();
@@ -413,7 +487,7 @@ export default function App() {
       try {
         const more = await api.query({
           view, search: debouncedSearch || undefined, tag: activeTag ?? undefined,
-          collection: activeCollection ?? undefined, sort, page: videoPage.page + 1, page_size: 48,
+          collection: activeCollection ?? undefined, sort: sortParam, page: videoPage.page + 1, page_size: 48,
         });
         const merged = [...items, ...more.items];
         setVideoPage({ ...more, items: merged });
@@ -439,6 +513,8 @@ export default function App() {
       await Promise.all([loadVideos(true), refreshMeta()]);
     } catch (e) { notify(String(e)); } finally { setScanning(false); setScanProgress(null); }
   };
+  // 导入完成后的自动扫描经 ref 调用，避免事件监听里捕获到旧的扫描状态
+  doScanRef.current = () => void doScan();
 
   const startSheets = async (all: boolean) => {
     try {
@@ -460,6 +536,22 @@ export default function App() {
       await Promise.all([loadVideos(true), refreshSheetStatus()]);
     } catch (e) { notify(String(e)); }
   };
+
+  // 文件夹视图「刷新封面」：只重置这个夹的缓存图（清自选封面 / 中帧 / 接触表记录与文件），
+  // 不做全库慢扫；随后重载该夹，卡片懒加载会把封面重新抽一遍。
+  const refreshFolderCovers = useCallback(async () => {
+    const name = folderPath.join(" › ");
+    const coll = collections.find((c) => c.deleted_at === 0 && c.kind === "auto" && c.name === name);
+    if (!coll) { notify("这个文件夹还没登记进库，先点「扫描库」"); return; }
+    setCoverBusy(true);
+    try {
+      const ids = await api.resetFolderCovers(coll.id);
+      resetCovers(ids);
+      setFolderTick((t) => t + 1);
+      notify(`已重置 ${ids.length} 张封面，正在重新抽取…`);
+      await loadVideos(true);
+    } catch (e) { notify(String(e)); } finally { setCoverBusy(false); }
+  }, [folderPath, collections, notify, loadVideos]);
 
   const scanLabel = !scanning
     ? "扫描库"
@@ -575,7 +667,7 @@ export default function App() {
           if (target && target.kind === "auto") { enterFolder(c ? c.split(" › ") : []); return; }
           pushLoc();
           setFolderPath([]);
-          setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added");
+          setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added"); setSortRev(false);
         }}
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
@@ -616,9 +708,16 @@ export default function App() {
                 />
                 {search && <button className="clear-search" onClick={() => setSearch("")}><Icon name="x" size={14} /></button>}
               </div>
-              <select className="select" value={sort} onChange={(e) => setSort(e.target.value)} title="排序">
+              <select className="select" value={sort} onChange={(e) => { setSort(e.target.value); setSortRev(false); }} title="排序">
                 {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
               </select>
+              <button
+                className={`icon-btn sort-dir ${sortRev ? "rev" : ""}`}
+                onClick={() => setSortRev((v) => !v)}
+                title={sortRev ? "当前：逆序（点一下改成正序）" : "当前：正序（点一下改成逆序）"}
+              >
+                <Icon name="sortDir" size={16} />
+              </button>
               <button className="btn" onClick={doScan} disabled={scanning} title="增量扫描：已登记且没变过的文件不会再跑 ffprobe">
                 <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanLabel}
               </button>
@@ -634,7 +733,7 @@ export default function App() {
                 <strong>{videoPage.total.toLocaleString()}</strong> 条视频
                 {(activeTag || activeCollection) && (
                   <span className="filter-chip">{activeTag ? `标签：${activeTag}` : `收藏夹：${activeCollection}`}
-                    <button onClick={() => { pushLoc(); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setSort("added"); }}><Icon name="x" size={12} /></button>
+                    <button onClick={() => { pushLoc(); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setSort("added"); setSortRev(false); }}><Icon name="x" size={12} /></button>
                   </span>
                 )}
               </div>
@@ -653,6 +752,14 @@ export default function App() {
                     <button className={i === folderPath.length - 1 ? "cur" : ""} onClick={() => enterFolder(folderPath.slice(0, i + 1))}>{seg}</button>
                   </span>
                 ))}
+                <button
+                  className="btn small crumb-refresh"
+                  onClick={() => void refreshFolderCovers()}
+                  disabled={coverBusy}
+                  title="只重抽这个文件夹里的封面（自选封面 / 中帧 / 接触表一起重置），不做全库慢扫"
+                >
+                  <Icon name="refresh" size={13} className={coverBusy ? "spin" : ""} />{coverBusy ? "刷新中…" : "刷新封面"}
+                </button>
               </nav>
             )}
 
@@ -675,7 +782,7 @@ export default function App() {
                         title={f.name + " · " + f.count + " 条"}>
                         <div className={`folder-thumb c${Math.min(f.covers.length, 4)}`}>
                           {f.covers.length > 0
-                            ? f.covers.map((c, i) => <img key={i} src={convertFileSrc(c)} alt="" loading="lazy" />)
+                            ? f.covers.map((c, i) => <img key={i} src={convertFileSrc(c) + (folderTick ? `?v=${folderTick}` : "")} alt="" loading="lazy" />)
                             : <div className="folder-thumb-empty"><Icon name="folder" size={26} /></div>}
                           <span className="folder-count">{f.count}</span>
                         </div>
@@ -844,6 +951,24 @@ export default function App() {
         />
       )}
 
+      {dropHover && (
+        <div className="drop-veil">
+          <div className="drop-card">
+            <Icon name="down" size={28} />
+            <b>松手即导入</b>
+            <span>自动进传输队列，按 0-199 / 200-399… 顺序落盘</span>
+          </div>
+        </div>
+      )}
+
+      {importer && importer.queue_total > 0 && (
+        <ImportHud
+          status={importer}
+          onCancel={() => { void api.cancelImport().catch((e) => notify(String(e))); }}
+          onClose={() => setImporter(null)}
+        />
+      )}
+
       {toast && <div className="toast"><Icon name="info" size={15} />{toast}</div>}
 
       {booting && <BootSplash stage={bootStage} fading={bootFade} />}
@@ -875,6 +1000,56 @@ function BootSplash({ stage, fading }: { stage: number; fading: boolean }) {
         <span className="boot-dots" />
       </div>
       <div className="boot-foot">本地数据 · 零联网</div>
+    </div>
+  );
+}
+
+/** 角落传输浮窗：队列位置 + 当前文件百分比 + 失败原因；完成后停几秒自退（有失败则留着） */
+function ImportHud({
+  status, onCancel, onClose,
+}: {
+  status: ImportStatus;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const done = !status.running;
+  const filePct = status.current_total > 0
+    ? Math.min(100, (status.current_done / status.current_total) * 100)
+    : 0;
+  const overall = status.queue_total > 0
+    ? Math.min(100, (status.queue_done / status.queue_total) * 100)
+    : 0;
+  const ok = status.queue_done - status.failed;
+  return (
+    <div className={`import-hud ${done ? "done" : ""}`}>
+      <div className="import-hud-head">
+        <span className="import-hud-icon">{done ? <Icon name="check" size={14} /> : <Icon name="down" size={14} />}</span>
+        <span className="import-hud-title">
+          {done
+            ? (status.failed > 0 ? `导入结束 · 成功 ${ok} / 失败 ${status.failed}` : `导入完成 · ${ok} 个视频`)
+            : `导入中 ${Math.min(status.queue_done + 1, status.queue_total)}/${status.queue_total}`}
+        </span>
+        <button
+          className="hud-x"
+          onClick={done ? onClose : onCancel}
+          title={done ? "关闭" : "取消导入（当前文件的半成品会清掉，已完成的保留）"}
+        >
+          <Icon name="x" size={13} />
+        </button>
+      </div>
+      {!done && (
+        <>
+          <div className="import-hud-file truncate" title={status.current_file}>{status.current_file || "准备中…"}</div>
+          <div className="import-hud-bar"><span style={{ width: `${filePct}%` }} /></div>
+          <div className="import-hud-meta">
+            <span>{formatBytes(status.current_done)} / {formatBytes(status.current_total)}</span>
+            <span>整批 {Math.round(overall)}%</span>
+          </div>
+        </>
+      )}
+      {status.last_error && (
+        <div className="import-hud-err truncate" title={status.last_error}>{status.last_error}</div>
+      )}
     </div>
   );
 }
@@ -926,6 +1101,22 @@ function SettingsModal({
             <label>ffprobe 路径（用于读取时长/编码）</label>
             <input value={draft.ffprobe_path || ""} placeholder="留空则自动检测"
               onChange={(e) => setDraft((d) => ({ ...d, ffprobe_path: e.target.value || null }))} />
+          </div>
+          <div className="field">
+            <label>拖拽导入根目录</label>
+            <div className="field-row">
+              <input
+                value={draft.import_root || ""}
+                placeholder={`留空 = 库里自动用 ${draft.library_root ? `${draft.library_root}\\Supervideo` : "<库目录>\\Supervideo"}`}
+                onChange={(e) => setDraft((d) => ({ ...d, import_root: e.target.value || null }))}
+              />
+              <button className="btn" onClick={async () => {
+                const dir = await api.pickDirectory();
+                if (dir) setDraft((d) => ({ ...d, import_root: dir }));
+              }}>选择</button>
+              <button className="btn" title="清空 = 用库根下的 Supervideo" onClick={() => setDraft((d) => ({ ...d, import_root: null }))}>默认</button>
+            </div>
+            <p className="hint">拖视频进来就复制到这个根目录下的区间夹：0-199、200-399…每夹 200 个，顺序排、满了自动开新区间，删出空位就往前补。</p>
           </div>
           <div className="field">
             <label>播放器内核</label>

@@ -82,7 +82,10 @@ export function VideoCard({
             </>
           )}
         </div>
-        <div className="card-sub">{relativeTime(video.last_watched_at || video.added_at)}</div>
+        {/* 显示文件本身的修改时间：以前这里显示入库时间，全库都是「一天前」没有意义 */}
+        <div className="card-sub" title={video.mtime > 0 ? "文件修改时间" : "加入影匣的时间"}>
+          {video.mtime > 0 ? `改于 ${relativeTime(video.mtime)}` : `加入于 ${relativeTime(video.added_at)}`}
+        </div>
       </div>
     </article>
   );

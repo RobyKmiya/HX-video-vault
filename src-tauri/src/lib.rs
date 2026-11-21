@@ -1,6 +1,7 @@
 pub mod db;
 pub mod downloader;
 pub mod edit;
+pub mod importer;
 pub mod media;
 pub mod models;
 mod mpv;
@@ -32,6 +33,9 @@ pub struct Settings {
     pub player_pref: String,
     #[serde(default)]
     pub mpv_path: Option<String>,
+    /// 拖拽导入的根目录；空 = 库根下的 Supervideo（区间夹：每夹 200 个视频）
+    #[serde(default)]
+    pub import_root: Option<String>,
 }
 
 fn default_player_pref() -> String { "auto".into() }
@@ -44,6 +48,7 @@ impl Default for Settings {
             ffprobe_path: None,
             player_pref: "auto".into(),
             mpv_path: None,
+            import_root: None,
         }
     }
 }
@@ -1164,6 +1169,80 @@ fn clear_cover(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     db::clear_cover(&lib.conn, id)
 }
 
+/// 重置一个收藏夹（文件夹）内所有成员的缓存图：清自选封面记录 + 接触表记录，
+/// 删 cover-{id}/mid-{id}/接触表缓存文件；返回被重置的成员 id 列表（前端据此给 URL 换版本号，
+/// 防 WebView 继续用旧图）。前端随后刷新列表，卡片懒加载只对这个夹重新生成封面（不用全库慢扫）。
+#[tauri::command]
+fn reset_folder_covers(state: State<'_, AppState>, collection_id: i64) -> Result<Vec<i64>, String> {
+    let (ids, cover_dir, sheet_paths) = {
+        let ctx = state.lock()?;
+        let lib = library(&ctx)?;
+        let ids = db::collection_member_ids(&lib.conn, collection_id)?;
+        for id in &ids {
+            db::clear_cover(&lib.conn, *id)?;
+        }
+        let sheets = db::clear_contact_sheets(&lib.conn, Some(&ids))?;
+        (
+            ids,
+            LibraryContext::vault_dir(&lib.root).join("cache").join("cover"),
+            sheets,
+        )
+    };
+    // 锁外删文件
+    for id in &ids {
+        for name in [
+            format!("cover-{id}.jpg"),
+            format!("cover-{id}.png"),
+            format!("mid-{id}.jpg"),
+        ] {
+            let _ = fs::remove_file(cover_dir.join(name));
+        }
+    }
+    for p in &sheet_paths {
+        let _ = fs::remove_file(p);
+    }
+    Ok(ids)
+}
+
+// ---------- 拖拽导入 ----------
+
+/// 拖拽导入的根目录：设置显式指定 > 库根\Supervideo。
+fn import_root_of(settings: &Settings, lib_root: &Path) -> PathBuf {
+    settings
+        .import_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| lib_root.join("Supervideo"))
+}
+
+/// 拖拽入队（前端把 webview 拖事件的 path 列表传进来）：
+/// 立即入队后台复制（.part 原子落盘 + 大小校验 + 单线程串行），返回实际入队数。
+#[tauri::command]
+fn import_videos(state: State<'_, AppState>, app: AppHandle, paths: Vec<String>) -> Result<usize, String> {
+    let import_root = {
+        let g = state.lock()?;
+        let lib = library(&g)?;
+        import_root_of(&g.settings, &lib.root)
+    };
+    let sources: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    importer::enqueue(&app, &import_root, &sources)
+}
+
+/// 导入队列现场（角落浮窗显示）。
+#[tauri::command]
+fn import_status() -> Result<crate::importer::ImportStatus, String> {
+    Ok(importer::status())
+}
+
+/// 取消导入：当前文件的半成品清掉，队列清空，已完成的保留。
+#[tauri::command]
+fn cancel_import() -> Result<(), String> {
+    importer::cancel();
+    Ok(())
+}
+
 // ---------- 收藏夹排序 ----------
 
 /// 主页层级浏览：某层下的 auto 子文件夹卡（parent=None 取顶层）。
@@ -1263,6 +1342,10 @@ pub fn run() {
             reorder_collections,
             reorder_collection_videos,
             list_folder_children,
+            import_videos,
+            import_status,
+            cancel_import,
+            reset_folder_covers,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

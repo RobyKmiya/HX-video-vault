@@ -29,6 +29,17 @@ export function bustCover(id: number) {
   busts[id] = Date.now();
 }
 
+/**
+ * 整个文件夹重置封面后调用：清掉请求缓存并换版本号。
+ * 文件名不变（cover-{id}.jpg），只删重生成的话 WebView 会继续用旧图 —— 必须换 URL 参数。
+ */
+export function resetCovers(ids: number[]) {
+  for (const id of ids) {
+    cache.delete(id);
+    busts[id] = Date.now();
+  }
+}
+
 function bustSuffix(id: number) {
   const v = busts[id];
   return v ? `?v=${v}` : "";
