@@ -372,21 +372,66 @@ pub fn extract_entry(archive_path: &Path, entry_index: usize, cache_dir: &Path) 
     Ok(target)
 }
 
-/// 生成 4×4 接触表（contact sheet）：比单张封面信息量大得多，
+/// 接触表可选格数与排布：格数必须能精确铺满矩形，否则 tile 会拿黑块补空。
+/// 横屏源用宽排布、竖屏源用高排布，让成品图比例尽量贴近源视频。
+const SHEET_LAYOUTS_WIDE: &[(usize, u32, u32)] = &[
+    (1, 1, 1),
+    (2, 2, 1),
+    (4, 2, 2),
+    (6, 3, 2),
+    (8, 4, 2),
+    (12, 4, 3),
+    (16, 4, 4),
+];
+const SHEET_LAYOUTS_TALL: &[(usize, u32, u32)] = &[
+    (1, 1, 1),
+    (2, 1, 2),
+    (4, 2, 2),
+    (6, 2, 3),
+    (8, 2, 4),
+    (12, 3, 4),
+    (16, 4, 4),
+];
+
+/// 按时长挑接触表排布：理想「每 45 秒一帧」向下取到最近的可整除格数。
+/// 返回（帧数, 列, 行, fps）；fps 带 +1 帧超采样，防源比元数据略短时尾帧被丢、tile 补黑。
+pub fn sheet_layout(duration_sec: f64, portrait: bool) -> (usize, u32, u32, f64) {
+    let ideal = if duration_sec > 0.0 {
+        ((duration_sec / 45.0).ceil() as usize).clamp(1, 16)
+    } else {
+        1
+    };
+    let table: &[(usize, u32, u32)] = if portrait { SHEET_LAYOUTS_TALL } else { SHEET_LAYOUTS_WIDE };
+    let (count, cols, rows) = table
+        .iter()
+        .rev()
+        .find(|(n, _, _)| *n <= ideal)
+        .copied()
+        .unwrap_or((1, 1, 1));
+    let fps = (count + 1) as f64 / duration_sec.max(0.1);
+    (count, cols, rows, fps)
+}
+
+/// 生成接触表（contact sheet）：比单张封面信息量大得多，
 /// 是视频库区别于漫画库的关键预览形态。
+/// 格数按时长在 1/2/4/6/8/12/16 里挑（可整除才不留黑空），横竖屏各有一套排布。
 pub fn contact_sheet(source: &Path, out: &Path) -> Result<(), String> {
     let Some(ffmpeg) = find_tool("ffmpeg") else {
         return Err("未找到 ffmpeg，请在设置里指定路径".into());
     };
+    let meta = probe(source);
+    let duration = if meta.duration_sec > 0.0 { meta.duration_sec } else { 45.0 };
+    let portrait = meta.width > 0 && meta.height > meta.width;
+    let (_, cols, rows, fps) = sheet_layout(duration, portrait);
+    let filter = format!("fps={fps:.6},scale=240:-2,tile={cols}x{rows}:margin=2:padding=2");
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let filter = "fps=1/45,scale=240:-2,tile=4x4:margin=2:padding=2";
     let status = crate::proc::quiet(ffmpeg)
         .args([
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", &source.to_string_lossy(),
-            "-vf", filter,
+            "-vf", &filter,
             "-frames:v", "1",
             "-q:v", "4",
             &out.to_string_lossy(),
@@ -449,6 +494,85 @@ mod tests {
         assert!(decode_data_url("http://x/y.png").is_err(), "非 data URL 应拒绝");
         assert!(decode_data_url("data:text/plain,raw").is_err(), "非 base64 应拒绝");
         assert!(decode_data_url("data:image/jpeg;base64,@@@").is_err(), "非法字符应拒绝");
+    }
+
+    #[test]
+    fn sheet_layout_follows_duration_and_orientation() {
+        // 短视频：1 帧 1×1（绝无黑空）；fps 是 (帧数+1)/时长的超采样值
+        assert_eq!(sheet_layout(2.0, false), (1, 1, 1, 1.0));
+        assert_eq!(sheet_layout(45.0, false), (1, 1, 1, 2.0 / 45.0));
+        // 100s → 理想 3 帧 → 向下取 2（2×1 横 / 1×2 竖）
+        assert_eq!(sheet_layout(100.0, false), (2, 2, 1, 3.0 / 100.0));
+        assert_eq!(sheet_layout(100.0, true), (2, 1, 2, 3.0 / 100.0));
+        // 200s → 理想 5 → 4（2×2）；300s → 理想 7 → 6（3×2）；400s → 理想 9 → 8（4×2）
+        assert_eq!(sheet_layout(200.0, false), (4, 2, 2, 5.0 / 200.0));
+        assert_eq!(sheet_layout(300.0, false), (6, 3, 2, 7.0 / 300.0));
+        assert_eq!(sheet_layout(300.0, true), (6, 2, 3, 7.0 / 300.0));
+        assert_eq!(sheet_layout(400.0, false), (8, 4, 2, 9.0 / 400.0));
+        assert_eq!(sheet_layout(400.0, true), (8, 2, 4, 9.0 / 400.0));
+        // 660s → 理想 15 → 12（4×3）；700s → 理想 16 → 封顶 16（4×4）
+        assert_eq!(sheet_layout(660.0, false), (12, 4, 3, 13.0 / 660.0));
+        assert_eq!(sheet_layout(700.0, false), (16, 4, 4, 17.0 / 700.0));
+        assert_eq!(sheet_layout(1200.0, false), (16, 4, 4, 17.0 / 1200.0));
+        assert_eq!(sheet_layout(1200.0, true), (16, 4, 4, 17.0 / 1200.0));
+        // 时长读不出：保底 1×1（时长按 0.1 兜底 → fps=2/0.1=20）
+        assert_eq!(sheet_layout(0.0, false), (1, 1, 1, 20.0));
+    }
+
+    /// 真实端到端：100s 测试片 → 接触表应为 2×1（两帧并排，无黑空）；2s 片应为 1×1
+    #[test]
+    fn real_ffmpeg_contact_sheet_adapts_tile_count() {
+        let Some(ffmpeg) = find_tool("ffmpeg") else {
+            eprintln!("SKIP: 本机没有 ffmpeg，跳过接触表端到端");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "vv-sheet-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str, dur: u32| {
+            let p = dir.join(name);
+            let st = crate::proc::quiet(&ffmpeg)
+                .args([
+                    "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", &format!("testsrc=size=320x240:rate=15:duration={dur}"),
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    &p.to_string_lossy(),
+                ])
+                .status()
+                .expect("ffmpeg 造测试片失败");
+            assert!(st.success());
+            p
+        };
+        let long = mk("long.mp4", 100);
+        let sheet = dir.join("sheet-long.jpg");
+        contact_sheet(&long, &sheet).unwrap();
+        let meta = probe(&sheet);
+        // 2×1：宽 ≈ 2×240（tile margin/padding ±16），高 ≈ 1×180
+        assert!(
+            (meta.width as i64 - 480).abs() <= 16 && (meta.height as i64 - 180).abs() <= 16,
+            "100s 片接触表应为 2×1（约 480×180），实测 {}×{}",
+            meta.width,
+            meta.height
+        );
+
+        let short = mk("short.mp4", 2);
+        let sheet2 = dir.join("sheet-short.jpg");
+        contact_sheet(&short, &sheet2).unwrap();
+        let meta = probe(&sheet2);
+        assert!(
+            (meta.width as i64 - 240).abs() <= 16 && (meta.height as i64 - 180).abs() <= 16,
+            "2s 片接触表应为 1×1（约 240×180），实测 {}×{}",
+            meta.width,
+            meta.height
+        );
+
+        fs::remove_dir_all(dir).ok();
     }
 
     /// 真实端到端：ffmpeg 造 2 秒测试片 → 抽中间帧，产物应是有效 JPEG。

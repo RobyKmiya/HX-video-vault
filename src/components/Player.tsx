@@ -417,7 +417,8 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     a.click();
   };
 
-  // 把当前画面设为封面：builtin 直接抓 <video> 当前帧（精确到暂停帧）；
+  // 把当前画面设为封面：builtin 只把当前秒数交给后端 ffmpeg 精确抽帧
+  // （canvas 在 asset 协议下被污染，toDataURL 抛 SecurityError，不能用）；
   // mpv 让 mpv 自己 screenshot-to-file（同样精确），写完轮询登记。
   // external（VLC/缺失）模式下控制条整条隐藏，天然没有这个入口。
   const setCover = async () => {
@@ -435,13 +436,8 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
         }
       } else {
         const v = videoRef.current;
-        if (!v || !v.videoWidth) { showHud("画面还没就绪"); return; }
-        const canvas = document.createElement("canvas");
-        canvas.width = v.videoWidth;
-        canvas.height = v.videoHeight;
-        canvas.getContext("2d")?.drawImage(v, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-        await api.setCoverImage(info.video.id, dataUrl);
+        if (!v || !Number.isFinite(v.currentTime)) { showHud("画面还没就绪"); return; }
+        await api.setCoverFromTime(info.video.id, v.currentTime);
       }
       bustCover(info.video.id);
       showHud("已设为封面");

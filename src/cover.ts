@@ -34,14 +34,13 @@ function bustSuffix(id: number) {
   return v ? `?v=${v}` : "";
 }
 
-/** 有已落库的封面（自选或接触表）时直接给出 URL，否则返回空串（走兜底 hook）。 */
+/** 有自选封面时直接给出 URL，否则返回空串（走中帧兜底 hook；接触表不再当封面）。 */
 export function coverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_sheet">): string {
   if (video.cover) return convertFileSrc(video.cover) + bustSuffix(video.id);
-  if (video.contact_sheet) return convertFileSrc(video.contact_sheet);
   return "";
 }
 
-/** 封面 URL 全优先级 hook：卡片与详情统一用它，兜底失败返回空串（调用方画占位）。 */
+/** 封面 URL hook：自选封面 > 中间帧（后端懒生成），兜底失败返回空串（调用方画占位）。 */
 export function useCoverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_sheet">): string {
   const own = coverSrc(video);
   const [fallback, setFallback] = useState("");

@@ -482,3 +482,7 @@ h1, h2, h3, p { margin: 0; }
 .edit-picker-row:hover { background: var(--accent-soft); }
 .edit-picker-row .muted { margin-left: auto; }
 .edit-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* ---- 详情页接触表（内容走向，不再当封面） ---- */
+.detail-sheet { margin-top: 14px; }
+.detail-sheet img { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); background: #10141c; }

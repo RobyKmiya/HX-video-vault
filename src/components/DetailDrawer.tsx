@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { bustCover, useCoverSrc } from "../cover";
 import { api } from "../api";
@@ -205,6 +206,13 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
 
         <h2 className="detail-title">{video.file_name}</h2>
         <div className="detail-path" title={video.path}>{video.path}</div>
+
+        {video.contact_sheet && (
+          <div className="detail-sheet">
+            <div className="section-title">内容走向（接触表）</div>
+            <img src={convertFileSrc(video.contact_sheet)} alt="" loading="lazy" title="每 45 秒抽一帧，格数按时长自适应" />
+          </div>
+        )}
 
         {watchedPercent > 0 && (
           <div className="detail-progress">

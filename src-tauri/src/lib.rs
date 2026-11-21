@@ -1102,6 +1102,41 @@ fn mpv_cover_path(state: State<'_, AppState>, id: i64) -> Result<String, String>
     Ok(dir.join(format!("cover-{id}.png")).to_string_lossy().to_string())
 }
 
+/// 内置播放器「设为封面」：canvas 在 asset 协议下会被污染导不出图（SecurityError），
+/// 所以改由前端只报当前秒数，后端 ffmpeg 精确抽那一帧（输入侧 seek + accurate_seek）。
+#[tauri::command]
+async fn set_cover_from_time(state: State<'_, AppState>, id: i64, sec: f64) -> Result<(), String> {
+    if !(sec.is_finite() && sec >= 0.0) {
+        return Err("时间点无效".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 短锁一：解析真实路径（压缩包条目按需解缓存）
+        let (resolved, path) = {
+            let guard = state.lock()?;
+            let lib = library(&guard)?;
+            let info = player::resolve(lib, id)?;
+            (
+                PathBuf::from(info.media_path),
+                db::LibraryContext::vault_dir(&lib.root).join("cache").join("cover").join(format!("cover-{id}.jpg")),
+            )
+        };
+        if !resolved.is_file() {
+            return Err("视频文件不存在".into());
+        }
+        {
+            let _gate = cover_gate();
+            media::extract_frame(&resolved, sec, &path)?;
+        }
+        // 短锁二：登记
+        let guard = state.lock()?;
+        let lib = library(&guard)?;
+        db::set_cover(&lib.conn, id, &path.to_string_lossy())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// mpv「设为封面」第二步：mpv 已把当前帧写到目标路径，登记进库。
 #[tauri::command]
 async fn set_cover_from_mpv(state: State<'_, AppState>, id: i64, path: String) -> Result<(), String> {
@@ -1188,6 +1223,7 @@ pub fn run() {
             set_cover_image,
             mpv_cover_path,
             set_cover_from_mpv,
+            set_cover_from_time,
             clear_cover,
         ])
         .run(tauri::generate_context!())

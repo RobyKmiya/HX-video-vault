@@ -100,5 +100,7 @@ export const api = {
   mpvCoverPath: (id: number) => invoke<string>("mpv_cover_path", { id }),
   /** mpv 已把当前帧写到目标路径后登记为封面 */
   setCoverFromMpv: (id: number, path: string) => invoke<void>("set_cover_from_mpv", { id, path }),
+  /** 内置播放器把当前秒数交给后端 ffmpeg 精确抽帧当封面（canvas 在 asset 协议下被污染不可用） */
+  setCoverFromTime: (id: number, sec: number) => invoke<void>("set_cover_from_time", { id, sec }),
   clearCover: (id: number) => invoke<void>("clear_cover", { id }),
 };
