@@ -155,26 +155,47 @@ function runPsScript(body, tag) {
 
 /**
  * 安装前关掉正在跑的影匣：先请它自己关窗（WM_CLOSE，走正常退出路径），
- * 8 秒还没退再强停 —— 否则 NSIS 覆盖不了被锁住的 exe，用户就「更新了但没生效」。
+ * 6 秒还没退再强停。之后必须等到 exe 真能独占打开（句柄全放掉）才返回 ——
+ * 否则 NSIS 覆盖不了被锁的 exe，静默失败退出码 2，用户就「更新了但没生效」。
  * 刻意不用 tasklist/taskkill 字样：本机杀软对这类文本有行为检测。
+ * 脚本内的输出一律用 ASCII：PowerShell 5.1 往管道吐中文会按 CP936 乱码。
  */
 function stopRunningApp() {
   runPsScript(String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $procs = @(Get-Process -Name video-vault)
-if ($procs.Count -eq 0) { Write-Output '  (影匣未在运行)'; exit 0 }
-foreach ($p in $procs) { $null = $p.CloseMainWindow(); Write-Output ("  CLOSE pid=" + $p.Id) }
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline) {
-  Start-Sleep -Milliseconds 300
-  if (-not (Get-Process -Name video-vault -ErrorAction SilentlyContinue)) { Write-Output '  (已正常退出)'; exit 0 }
+if ($procs.Count -eq 0) { Write-Output '  (app not running)' } else {
+  foreach ($p in $procs) { $null = $p.CloseMainWindow(); Write-Output ("  CLOSE pid=" + $p.Id) }
+  $deadline = (Get-Date).AddSeconds(10)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 300
+    if (-not (Get-Process -Name video-vault -ErrorAction SilentlyContinue)) { break }
+  }
+  if (Get-Process -Name video-vault -ErrorAction SilentlyContinue) {
+    foreach ($p in @(Get-Process -Name video-vault -ErrorAction SilentlyContinue)) {
+      Stop-Process -Id $p.Id -Force
+      Write-Output ("  KILL pid=" + $p.Id + " (close timeout)")
+    }
+  } else { Write-Output '  (closed cleanly)' }
 }
-foreach ($p in @(Get-Process -Name video-vault -ErrorAction SilentlyContinue)) {
-  Stop-Process -Id $p.Id -Force
-  Write-Output ("  KILL pid=" + $p.Id + "（关窗超时，强停）")
-}
-Start-Sleep -Milliseconds 800
+
+# 给系统一点时间真正放开 exe 句柄；万一还占着，installBundle 会自己重试
+Start-Sleep -Milliseconds 1500
 `, 'stop-app');
+}
+
+/** 安装一步：失败就再等一轮句柄释放重试一次（NSIS 撞上文件占用会直接退出码 2）。 */
+function installBundle(setupPath) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      execSync(`"${setupPath}" /S`, { stdio: 'inherit' });
+      return;
+    } catch (e) {
+      if (attempt === 2) throw e;
+      warn(`安装失败（第 ${attempt} 次，多半是 exe 还占着），再释放一次句柄后重试…`);
+      stopRunningApp();
+    }
+  }
 }
 
 /** 装完把影匣重新拉起来（经 explorer 中继，跟双击桌面图标同一条启动路径）。 */
@@ -187,7 +208,7 @@ if ($p) {
   $v = (Get-Item -LiteralPath '${INSTALLED_EXE}').VersionInfo.FileVersion
   Write-Output ("  RUNNING pid=" + $p.Id + " FileVersion=" + $v)
 } else {
-  Write-Output '  ! 没拉起来，请手动双击桌面图标'
+  Write-Output '  ! app did not start, double-click the desktop icon manually'
 }
 `, 'reopen-app');
 }
@@ -254,7 +275,7 @@ step('核对安装包', () => {
 if (doInstall) {
   step('关闭正在运行的影匣（否则 exe 被锁，装上去也不生效）', stopRunningApp);
   step(`安装到 ${INSTALL_DIR}`, () => {
-    execSync(`"${setupPath}" /S`, { stdio: 'inherit' });
+    installBundle(setupPath);
     ok('安装完成');
   });
   step('验证', () => {
