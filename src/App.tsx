@@ -150,6 +150,24 @@ export default function App() {
     reloadRef.current = () => void loadVideos(true);
   }, [loadVideos]);
 
+  // 无限滚动：哨兵进入视口下方 800px 就自动续载下一页；
+  // loading 期间观察器先拆掉，载完重挂（列表没填满视口时会连发补齐，填满即停）
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const canLoadMore = videoPage.items.length < videoPage.total && !loading;
+  useEffect(() => {
+    if (!canLoadMore) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadVideos(false);
+      },
+      { rootMargin: "800px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [canLoadMore, loadVideos]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -529,10 +547,14 @@ export default function App() {
                   ))}
                 </div>
                 {videoPage.items.length < videoPage.total && (
-                  <div className="load-more">
-                    <button className="btn" onClick={() => void loadVideos(false)} disabled={loading}>
-                      {loading ? "加载中…" : `加载更多（还有 ${videoPage.total - videoPage.items.length} 条）`}
-                    </button>
+                  <div className="load-more" ref={sentinelRef}>
+                    {loading ? (
+                      <span className="muted">加载中…</span>
+                    ) : (
+                      <button className="btn" onClick={() => void loadVideos(false)}>
+                        加载更多（还有 {videoPage.total - videoPage.items.length} 条）
+                      </button>
+                    )}
                   </div>
                 )}
               </>
