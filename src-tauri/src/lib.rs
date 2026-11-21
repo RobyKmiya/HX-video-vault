@@ -1166,6 +1166,17 @@ fn clear_cover(state: State<'_, AppState>, id: i64) -> Result<(), String> {
 
 // ---------- 收藏夹排序 ----------
 
+/// 主页层级浏览：某层下的 auto 子文件夹卡（parent=None 取顶层）。
+#[tauri::command]
+fn list_folder_children(
+    state: State<'_, AppState>,
+    parent: Option<String>,
+) -> Result<Vec<crate::models::FolderInfo>, String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    db::list_folder_children(&lib.conn, &lib.root, parent.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+}
+
 /// 侧栏收藏夹拖拽排序：前端给出拖完后的完整 id 顺序。
 #[tauri::command]
 fn reorder_collections(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
@@ -1251,6 +1262,7 @@ pub fn run() {
             clear_cover,
             reorder_collections,
             reorder_collection_videos,
+            list_folder_children,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

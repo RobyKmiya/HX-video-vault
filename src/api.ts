@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
+  FolderInfo,
   DownloadTask,
   EditReport,
   EditSource,
@@ -108,4 +109,7 @@ export const api = {
   /** 内置播放器把当前秒数交给后端 ffmpeg 精确抽帧当封面（canvas 在 asset 协议下被污染不可用） */
   setCoverFromTime: (id: number, sec: number) => invoke<void>("set_cover_from_time", { id, sec }),
   clearCover: (id: number) => invoke<void>("clear_cover", { id }),
+  /** 主页层级浏览：某层下的 auto 子文件夹卡（parent=null 取顶层） */
+  listFolderChildren: (parent: string | null) =>
+    invoke<FolderInfo[]>("list_folder_children", { parent }),
 };

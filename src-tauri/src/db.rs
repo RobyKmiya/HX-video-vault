@@ -997,6 +997,77 @@ pub fn reorder_collections(conn: &Connection, ids: &[i64]) -> Result<(), String>
     Ok(())
 }
 
+/// 主页层级浏览：列出某层下的 auto 子文件夹卡。
+/// parent = None 取顶层（名字里没有 › 的单段夹）；Some(路径) 取以「路径 › 」开头的一层。
+/// 封面拼贴素材取夹内前 4 个成员（按位次）的已有图片：自选封面 > 中帧缓存 > 接触表，
+/// 现场不生成任何图（点进文件夹后视频卡片的懒加载会逐步把缓存填满，下一轮浏览自然有图）。
+pub fn list_folder_children(
+    conn: &Connection,
+    root: &Path,
+    parent: Option<&str>,
+) -> Result<Vec<crate::models::FolderInfo>, String> {
+    const SEP: &str = " › ";
+    let (like_kw, bind): (&str, String) = match parent {
+        None => ("NOT LIKE", format!("%{}%", SEP)),
+        Some(p) => ("LIKE", format!("%{}{}%", escape_like(p), escape_like(SEP))),
+    };
+    let sql = format!(
+        "SELECT c.id, c.name, COUNT(cv.video_id)
+         FROM collections c LEFT JOIN collection_videos cv ON cv.collection_id = c.id
+         WHERE c.kind='auto' AND c.deleted_at=0 AND c.name {like_kw} ? ESCAPE '\\'
+         GROUP BY c.id ORDER BY c.name COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![bind], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut member_stmt = conn
+        .prepare("SELECT video_id FROM collection_videos WHERE collection_id=?1 ORDER BY position LIMIT 4")
+        .map_err(|e| e.to_string())?;
+    let cover_dir = LibraryContext::vault_dir(root).join("cache").join("cover");
+
+    let mut out = Vec::new();
+    for (id, name, count) in rows.filter_map(Result::ok) {
+        let leaf = match parent {
+            None => name.clone(),
+            Some(p) => name[p.len() + SEP.len()..].to_string(),
+        };
+        let mut covers: Vec<String> = Vec::new();
+        let member_ids: Vec<i64> = member_stmt
+            .query_map(params![id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for vid in member_ids {
+            if covers.len() >= 4 {
+                break;
+            }
+            let candidates = [
+                get_cover_path(conn, vid).ok().flatten(),
+                Some(cover_dir.join(format!("mid-{vid}.jpg")).to_string_lossy().to_string()),
+            ];
+            for c in candidates.into_iter().flatten() {
+                if covers.len() < 4 && Path::new(&c).is_file() {
+                    covers.push(c);
+                    break;
+                }
+            }
+            if covers.len() < 4 {
+                if let Ok(item) = get_video(conn, vid) {
+                    if !item.contact_sheet.is_empty() && Path::new(&item.contact_sheet).is_file() {
+                        covers.push(item.contact_sheet);
+                    }
+                }
+            }
+        }
+        out.push(crate::models::FolderInfo { id, name, leaf, count, covers });
+    }
+    Ok(out)
+}
+
 /// 扫描后同步「磁盘文件夹 → 自动收藏夹」：
 /// 库根下的每层子目录镜像成 kind='auto' 的收藏夹（名 = 相对路径以 › 连接，分组 = 首段），
 /// 视频/压缩包条目按所在目录自动归位；文件移走或删掉的旧链接会被清掉。
@@ -1038,7 +1109,7 @@ pub fn sync_folder_collections(
     }
 
     let mut synced = 0usize;
-    for (rel_dir, ids) in &dir_ids {
+    for (rel_dir, _ids) in &dir_ids {
         let name = rel_dir.replace(['\\', '/'], " › ");
         let group = name.split(" › ").next().unwrap_or("").to_string();
         conn.execute(
@@ -2100,6 +2171,63 @@ mod tests {
         assert!(auto_of("A › B").is_none(), "B 目录已无视频，镜像夹应整夹消失");
         assert!(!member_ids(col_ab).contains(&id_b), "旧位置链接应被清掉");
         assert!(member_ids(col_a).contains(&id_b), "新位置应补链");
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 层级浏览：顶层=单段名夹；子层=前缀匹配；封面只取已有缓存，现场不生成
+    #[test]
+    fn list_folder_children_returns_layers() {
+        let (root, ctx) = temp_lib();
+        fs::create_dir_all(root.join("A")).unwrap();
+        fs::create_dir_all(root.join("A/B")).unwrap();
+        let paths = vec![
+            root.join("A").join("a.mp4"),
+            root.join("A").join("a2.mp4"),
+            root.join("A").join("B").join("b.mp4"),
+        ];
+        for p in &paths {
+            fs::write(p, b"x").unwrap();
+        }
+        let ps = |p: &Path| p.to_string_lossy().to_string();
+        for p in &paths {
+            upsert_video(&ctx.conn, &rec(&ps(p), 0)).unwrap();
+        }
+        let seen: Vec<String> = paths.iter().map(|p| ps(p)).collect();
+        sync_folder_collections(&ctx.conn, &root, &seen).unwrap();
+
+        // 顶层：只有 A（单段名），B 在下一层；a/a2 两条成员
+        let top = list_folder_children(&ctx.conn, &root, None).unwrap();
+        assert_eq!(top.len(), 1, "顶层应只有 A（根目录无视频不生成夹）");
+        assert_eq!(top[0].leaf, "A");
+        assert_eq!(top[0].name, "A");
+        assert_eq!(top[0].count, 2);
+
+        // 子层：A 下有 B；leaf 只剩末段
+        let sub = list_folder_children(&ctx.conn, &root, Some("A")).unwrap();
+        assert_eq!(sub.len(), 1);
+        assert_eq!(sub[0].name, "A › B");
+        assert_eq!(sub[0].leaf, "B");
+        assert_eq!(sub[0].count, 1);
+
+        // 封面：无任何缓存 → 空 covers（现场不生成，占位由前端画）
+        assert_eq!(top[0].covers.len(), 0, "没有缓存图时 covers 应为空");
+
+        // 造一个成员的中帧缓存后重查 → covers 出现该路径
+        let mid = LibraryContext::vault_dir(&root)
+            .join("cache")
+            .join("cover")
+            .join("mid-1.jpg");
+        fs::create_dir_all(mid.parent().unwrap()).unwrap();
+        fs::write(&mid, b"fake-jpeg").unwrap();
+        let top2 = list_folder_children(&ctx.conn, &root, None).unwrap();
+        assert_eq!(top2[0].covers.len(), 1, "有缓存图的成员才进拼贴素材");
+        assert!(top2[0].covers[0].ends_with("mid-1.jpg"));
+
+        // 空层：B 下没有子文件夹
+        let deeper = list_folder_children(&ctx.conn, &root, Some("A › B")).unwrap();
+        assert_eq!(deeper.len(), 0);
 
         drop(ctx);
         let _ = fs::remove_dir_all(&root);

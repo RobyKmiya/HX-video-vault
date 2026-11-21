@@ -233,6 +233,18 @@ export interface EditStatus {
   message: string;
 }
 
+/** 主页层级浏览：一个子文件夹卡（auto 收藏夹 = 磁盘目录镜像） */
+export interface FolderInfo {
+  id: number;
+  /** 完整路径名（A › B） */
+  name: string;
+  /** 末段名，卡片标题用 */
+  leaf: string;
+  count: number;
+  /** 封面拼贴素材（≤4 张已有图片路径） */
+  covers: string[];
+}
+
 /** 剪辑结果 */
 export interface EditReport {
   output_path: string;

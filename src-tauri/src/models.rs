@@ -224,6 +224,20 @@ pub struct EditSource {
     pub path: Option<String>,
 }
 
+/// 主页层级浏览的一个子文件夹卡（auto 收藏夹 = 磁盘目录镜像）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderInfo {
+    pub id: i64,
+    /// 完整路径名（A › B）
+    pub name: String,
+    /// 末段名（B），卡片标题用
+    pub leaf: String,
+    /// 夹内视频条数（压缩包条目各算一条）
+    pub count: i64,
+    /// 封面拼贴素材（≤4 张已有图片：自选封面 > 中帧缓存 > 接触表，存在哪个算哪个）
+    pub covers: Vec<String>,
+}
+
 /// 剪辑任务现场（面板显示用）。percent 0..100，-1 表示无法估进度（仅拼接 copy 前探测期）。
 #[derive(Debug, Clone, Serialize)]
 pub struct EditStatus {

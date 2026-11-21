@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./components/Icons";
 import { Sidebar, type ViewKey } from "./components/Sidebar";
 import { VideoCard } from "./components/VideoCard";
@@ -14,6 +15,7 @@ import { api } from "./api";
 import { formatBytes } from "./format";
 import type {
   Collection,
+  FolderInfo,
   LibraryInfo,
   PlaybackInfo,
   ScanProgress,
@@ -91,6 +93,10 @@ export default function App() {
   const [sheet, setSheet] = useState<SheetStatus>({ running: false, total: 0, done: 0, pending: 0 });
   const [sheetLive, setSheetLive] = useState<{ done: number; total: number; name?: string } | null>(null);
   const [collectionsOpen, setCollectionsOpen] = useState(false);
+  // 主页层级浏览：当前所在文件夹路径（auto 收藏夹的层级 = 磁盘目录树）
+  const [folderPath, setFolderPath] = useState<string[]>([]);
+  const [folders, setFolders] = useState<FolderInfo[]>([]);
+  const [folderSort, setFolderSort] = useState<"name" | "count">("name");
   // 启动屏：真实分阶段进度（打开 → 元数据 → 影片墙 → 就绪），元数据与影片墙并行谁慢等谁
   const [booting, setBooting] = useState(true);
   const [bootStage, setBootStage] = useState(0);
@@ -116,6 +122,28 @@ export default function App() {
   }, []);
 
   const activeCollections = useMemo(() => collections.filter((c) => c.deleted_at === 0), [collections]);
+
+  // 层级浏览：加载当前层的子文件夹卡（封面来自已有缓存，点进夹后视频懒加载会逐步填满）
+  useEffect(() => {
+    if (!ready || !info) return;
+    const parent = folderPath.length ? folderPath.join(" › ") : null;
+    api.listFolderChildren(parent).then(setFolders).catch(() => setFolders([]));
+  }, [ready, info, folderPath, collections]);
+
+  // 进入某层：文件夹路径、当前收藏夹与排序一并切换（auto 夹用拖拽位次）
+  const enterFolder = useCallback((path: string[]) => {
+    setFolderPath(path);
+    setSelected(new Set());
+    if (path.length) {
+      setActiveCollection(path.join(" › "));
+      setActiveTag(null);
+      setView("all");
+      setSort("manual");
+    } else {
+      setActiveCollection(null);
+      setSort("added");
+    }
+  }, []);
 
   const loadVideos = useCallback(async (reset = true) => {
     setLoading(true);
@@ -471,13 +499,18 @@ export default function App() {
     <div className="app-shell">
       <Sidebar
         view={view}
-        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
+        onView={(v) => { setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
         tags={tags}
         activeTag={activeTag}
         onTag={(t) => { setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
         collections={activeCollections}
         activeCollection={activeCollection}
-        onCollection={(c) => { setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added"); }}
+        onCollection={(c) => {
+          const target = collections.find((x) => x.deleted_at === 0 && x.name === c);
+          if (target && target.kind === "auto") { enterFolder(c ? c.split(" › ") : []); return; }
+          setFolderPath([]);
+          setActiveCollection(c); setActiveTag(null); setView("all"); setStatsOpen(false); setTagsOpen(false); setSort(c ? "manual" : "added");
+        }}
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
         onReordered={() => void refreshMeta()}
@@ -535,7 +568,7 @@ export default function App() {
                 <strong>{videoPage.total.toLocaleString()}</strong> 条视频
                 {(activeTag || activeCollection) && (
                   <span className="filter-chip">{activeTag ? `标签：${activeTag}` : `收藏夹：${activeCollection}`}
-                    <button onClick={() => { setActiveTag(null); setActiveCollection(null); setSort("added"); }}><Icon name="x" size={12} /></button>
+                    <button onClick={() => { setActiveTag(null); setActiveCollection(null); setFolderPath([]); setSort("added"); }}><Icon name="x" size={12} /></button>
                   </span>
                 )}
               </div>
@@ -544,6 +577,48 @@ export default function App() {
                 <span className="size-chip">{formatBytes(stats.total_bytes)}</span>
               </div>
             </div>
+
+            {folderPath.length > 0 && (
+              <nav className="breadcrumb">
+                <button className={folderPath.length === 0 ? "cur" : ""} onClick={() => enterFolder([])}>全部视频</button>
+                {folderPath.map((seg, i) => (
+                  <span key={folderPath.slice(0, i + 1).join(" › ")} className="crumb-seg">
+                    <span className="crumb-sep">›</span>
+                    <button className={i === folderPath.length - 1 ? "cur" : ""} onClick={() => enterFolder(folderPath.slice(0, i + 1))}>{seg}</button>
+                  </span>
+                ))}
+              </nav>
+            )}
+
+            {folders.length > 0 && (
+              <section className="folder-strip">
+                <div className="folder-strip-head">
+                  <span className="section-title">{folderPath.length ? "子文件夹" : "文件夹"}</span>
+                  <span className="folder-sort">
+                    <button className={folderSort === "name" ? "on" : ""} onClick={() => setFolderSort("name")}>名称</button>
+                    <button className={folderSort === "count" ? "on" : ""} onClick={() => setFolderSort("count")}>数量</button>
+                  </span>
+                </div>
+                <div className="folder-grid">
+                  {[...folders]
+                    .sort((a, b) => (folderSort === "name"
+                      ? a.leaf.localeCompare(b.leaf, "zh-CN")
+                      : b.count - a.count))
+                    .map((f) => (
+                      <button className="folder-card" key={f.id} onClick={() => enterFolder([...folderPath, f.leaf])}
+                        title={f.name + " · " + f.count + " 条"}>
+                        <div className={`folder-thumb c${Math.min(f.covers.length, 4)}`}>
+                          {f.covers.length > 0
+                            ? f.covers.map((c, i) => <img key={i} src={convertFileSrc(c)} alt="" loading="lazy" />)
+                            : <div className="folder-thumb-empty"><Icon name="folder" size={26} /></div>}
+                          <span className="folder-count">{f.count}</span>
+                        </div>
+                        <div className="folder-name truncate">{f.leaf}</div>
+                      </button>
+                    ))}
+                </div>
+              </section>
+            )}
 
             {selected.size > 0 && (
               <div className="bulk-bar">
