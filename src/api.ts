@@ -129,4 +129,9 @@ export const api = {
   moveTargets: () => invoke<MoveTarget[]>("move_targets"),
   /** 资源管理器里定位并选中该文件 */
   revealVideo: (id: number) => invoke<void>("reveal_video", { id }),
+  /** 沉浸播放：去掉系统标题栏 + 全屏（画匣沉浸阅读同款） */
+  setImmersive: (on: boolean) => invoke<void>("set_immersive", { on }),
+  /** 把所选视频打包成 zip（保留原文件），返回压缩包路径 */
+  compressVideos: (ids: number[], name?: string) =>
+    invoke<string>("compress_videos", { ids, name: name ?? null }),
 };

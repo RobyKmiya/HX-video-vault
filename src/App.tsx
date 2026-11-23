@@ -13,9 +13,14 @@ import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { EditPanel } from "./components/EditPanel";
 import { MoveDialog } from "./components/MoveDialog";
+import { RenameDialog } from "./components/RenameDialog";
 import { api } from "./api";
 import { resetCovers } from "./cover";
 import { formatBytes } from "./format";
+import {
+  ACTIONS, loadKeyMap, saveKeyMap, comboFromEvent, actionForCombo, bindAction, unbindAction,
+  type ActionId, type KeyMap,
+} from "./shortcuts";
 import type {
   Collection,
   FolderInfo,
@@ -36,6 +41,7 @@ import type {
 type NavLoc = { view: ViewKey; folder: string[]; tag: string | null; coll: string | null; sort: string; rev: boolean };
 
 const SORTS = [
+  { key: "folder", label: "文件夹" },
   { key: "added", label: "最近加入" },
   { key: "mtime", label: "文件修改时间" },
   { key: "watched", label: "最近观看" },
@@ -66,7 +72,7 @@ export default function App() {
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [settings, setSettings] = useState<Settings>({
     library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto", mpv_path: null,
-    import_root: null,
+    import_root: null, double_click: "play", immersive_default: false, show_card_info: true,
   });
   const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -101,6 +107,13 @@ export default function App() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   // 批量移动对话框：非空即打开（值为待移动的 id）
   const [moveIds, setMoveIds] = useState<number[] | null>(null);
+  // 右键菜单（画廊里点卡片）：坐标 + 这次要操作的 id 列表
+  const [menu, setMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<VideoItem | null>(null);
+  const [menuBusy, setMenuBusy] = useState(false);
+  // 快捷键表：默认全空，只在设置页录制后才有绑定
+  const [keymap, setKeymap] = useState<KeyMap>(() => loadKeyMap());
+  const [immersive, setImmersive] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -124,6 +137,11 @@ export default function App() {
   const [bootMetaDone, setBootMetaDone] = useState(false);
   const [bootGridDone, setBootGridDone] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const keymapRef = useRef(keymap);
+  keymapRef.current = keymap;
+  const immersiveDefaultRef = useRef(false);
+  immersiveDefaultRef.current = !!settings.immersive_default;
+  const actionRef = useRef<(id: ActionId) => void>(() => {});
   const reloadRef = useRef<() => void>(() => {});
   const lastScanRefresh = useRef(0);
   // 导入结束只处理一次（防同一批完成事件重复触发扫描）
@@ -444,6 +462,22 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // 可录制的快捷键：默认没有绑定，录入后这里的处理器在设置页之外生效
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+      const combo = comboFromEvent(e);
+      if (!combo) return;
+      const action = actionForCombo(keymapRef.current, combo);
+      if (!action) return;
+      e.preventDefault();
+      actionRef.current(action);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const detail = useMemo(
     () => videoPage.items.find((v) => v.id === detailId) ?? null,
     [videoPage.items, detailId],
@@ -457,6 +491,9 @@ export default function App() {
       if (!took) void api.mpvClose().catch(() => {});
       const result = await api.playback(id);
       setPlayer({ ...result, source: took ? "mpv" : result.source });
+      if (immersiveDefaultRef.current) {
+        void api.setImmersive(true).then(() => setImmersive(true)).catch((e) => notify(String(e)));
+      }
       // 正在播的那条就是「当前选中的那条」，关掉播放器后网格要知道该高亮谁
       setSelected(new Set([id]));
       setDetailId((cur) => (cur === null ? null : id));
@@ -581,6 +618,87 @@ export default function App() {
     if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) setDetailId(video.id);
   };
 
+  const setImmersiveMode = useCallback(async (on: boolean) => {
+    try {
+      await api.setImmersive(on);
+      setImmersive(on);
+    } catch (e) { notify(String(e)); }
+  }, [notify]);
+
+  // 库内回收站：只改库标记，磁盘文件不动；二次确认后才执行
+  const trashIds = async (ids: number[]) => {
+    if (!ids.length) return;
+    if (!window.confirm(`把 ${ids.length} 条移入影匣回收站？\n磁盘上的文件不会被删除。`)) return;
+    try {
+      for (const id of ids) await api.trash(id, true);
+      notify(`已移入回收站 ${ids.length} 条（文件原样保留）`);
+      setSelected(new Set());
+      setDetailId(null);
+      setMenu(null);
+      await Promise.all([refreshMeta(), loadVideos(true)]);
+    } catch (e) { notify(String(e)); }
+  };
+
+  // 动作表：右键菜单与可录制快捷键共用同一套入口
+  const runAction = (id: ActionId) => {
+    const ids = selected.size ? [...selected] : detailId != null ? [detailId] : [];
+    switch (id) {
+      case "sort.added": case "sort.folder": case "sort.title": case "sort.size":
+        setSort(id.slice(5));
+        setSortRev(false);
+        if (id === "sort.folder") setFolderPath([]);
+        break;
+      case "sort.toggleDir":
+        setSortRev((v) => !v);
+        break;
+      case "play.toggle": case "play.speedUp": case "play.speedDown":
+        if (!player) { notify("先在画廊里双击一条开始播放"); break; }
+        window.dispatchEvent(new CustomEvent("vv-player-action", { detail: { action: id } }));
+        break;
+      case "select.all":
+        setSelected(new Set(videoPage.items.map((v) => v.id)));
+        break;
+      case "select.clear":
+        setSelected(new Set());
+        break;
+      case "fav.toggle": {
+        if (!ids.length) { notify("先勾选影片，或打开一条详情"); break; }
+        const first = videoPage.items.find((v) => v.id === ids[0]);
+        const fav = !first?.favorite;
+        void (async () => {
+          try {
+            for (const videoId of ids) await api.patch({ id: videoId, favorite: fav });
+            notify(fav ? `已收藏 ${ids.length} 条` : `已取消收藏 ${ids.length} 条`);
+            await Promise.all([refreshMeta(), loadVideos(true)]);
+          } catch (e) { notify(String(e)); }
+        })();
+        break;
+      }
+      case "folder.up":
+        if (!folderPath.length) { notify("已经在库根目录了"); break; }
+        setFolderPath((p) => p.slice(0, -1));
+        break;
+      case "edit.rename": {
+        const target = videoPage.items.find((v) => v.id === ids[0]) ?? detail;
+        if (!target) { notify("先勾选一条影片"); break; }
+        setRenameTarget(target);
+        break;
+      }
+      case "edit.move":
+        if (!ids.length) { notify("先勾选要移动的影片"); break; }
+        setMoveIds(ids);
+        break;
+      case "edit.trash":
+        void trashIds(ids);
+        break;
+      case "immersive.toggle":
+        void setImmersiveMode(!immersive);
+        break;
+    }
+    setMenu(null);
+  };
+  actionRef.current = runAction;
+
   // 收藏夹内拖拽排序：进收藏夹视图自动切「手动排序」，卡片可拖拽换位
   const activeCollectionId = useMemo(
     () => collections.find((c) => c.deleted_at === 0 && c.name === activeCollection)?.id ?? null,
@@ -653,7 +771,7 @@ export default function App() {
           </div>
           <button className="link-btn" onClick={() => setSettingsOpen(true)}>高级设置</button>
         </div>
-        {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} onClose={() => setSettingsOpen(false)} notify={notify} />}
+        {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} onClose={() => setSettingsOpen(false)} notify={notify} />}
       </div>
     );
   }
@@ -772,7 +890,44 @@ export default function App() {
               </nav>
             )}
 
-            {folders.length > 0 && (
+            {view === "gallery" && (
+              <section className="folder-strip gallery-strip">
+                <div className="folder-strip-head">
+                  <span className="section-title">合集画廊 · 只记名与统计，影片仍逐条显示</span>
+                  <span className="gallery-head-actions">
+                    <button className={`pill ${activeCollection ? "" : "on"}`} onClick={() => { setActiveCollection(null); setSort("added"); setSortRev(false); }}>全部影片</button>
+                    <button className="pill" onClick={() => setCollectionsOpen(true)}><Icon name="plus" size={12} />新建合集</button>
+                  </span>
+                </div>
+                <div className="folder-grid">
+                  {activeCollections.filter((c) => c.kind === "custom").map((c) => {
+                    const covers = videoPage.items.filter((v) => v.collections.includes(c.name))
+                      .map((v) => v.cover || v.contact_sheet).filter(Boolean).slice(0, 4);
+                    return (
+                      <button
+                        key={c.id}
+                        className={`folder-card ${activeCollection === c.name ? "active" : ""}`}
+                        onClick={() => { setActiveCollection((cur) => (cur === c.name ? null : c.name)); setSort("added"); setSortRev(false); }}
+                        title={`${c.name} · ${c.count} 条${c.group_name ? ` · ${c.group_name}` : ""}`}
+                      >
+                        <div className={`folder-thumb c${covers.length}`}>
+                          {covers.length > 0
+                            ? covers.map((src, i) => <img key={i} src={src} alt="" loading="lazy" />)
+                            : <div className="folder-thumb-empty"><Icon name="sparkle" size={26} /></div>}
+                          <span className="folder-count">{c.count}</span>
+                        </div>
+                        <div className="folder-name truncate">{c.name}</div>
+                      </button>
+                    );
+                  })}
+                  {activeCollections.filter((c) => c.kind === "custom").length === 0 && (
+                    <p className="folder-mode-hint">还没有合集。点「新建合集」起一个名字，影片照常逐条展示。</p>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {sort === "folder" && folders.length > 0 && (
               <section className="folder-strip">
                 <div className="folder-strip-head">
                   <span className="section-title">{folderPath.length ? "子文件夹" : "文件夹"}</span>
@@ -861,7 +1016,11 @@ export default function App() {
               </div>
             )}
 
-            {videoPage.items.length === 0 ? (
+            {sort === "folder" && folders.length > 0 ? (
+              <p className="folder-mode-hint">
+                当前是「文件夹」排序：这一层只列文件夹，点进去看视频；换成其它排序就会回到影片墙。
+              </p>
+            ) : videoPage.items.length === 0 ? (
               <div className="empty">
                 <Icon name="grid" size={40} />
                 <h2>这里还是空的</h2>
@@ -872,12 +1031,26 @@ export default function App() {
               </div>
             ) : (
               <>
-                <div className="video-grid">
+                <div
+                  className="video-grid"
+                  onContextMenu={(e) => {
+                    const el = (e.target as HTMLElement).closest("[data-video-id]");
+                    if (!el) return;
+                    e.preventDefault();
+                    const id = Number(el.getAttribute("data-video-id"));
+                    if (!Number.isFinite(id)) return;
+                    const ids = selected.has(id) ? [...selected] : [id];
+                    if (!selected.has(id)) setSelected(new Set([id]));
+                    setMenu({ x: e.clientX, y: e.clientY, ids });
+                  }}
+                >
                   {videoPage.items.map((v) => (
                     <VideoCard
                       key={`${v.id}`}
                       video={v}
                       selected={selected.has(v.id)}
+                      doubleClick={settings.double_click === "detail" ? "detail" : "play"}
+                      showInfo={settings.show_card_info !== false}
                       onSelect={selectOne}
                       onOpen={(item) => setDetailId(item.id)}
                       onPlay={(item) => void openPlayer(item)}
@@ -926,6 +1099,79 @@ export default function App() {
         />
       )}
 
+      {menu && (
+        <>
+          <div className="menu-shadow" onMouseDown={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
+          <div
+            className="context-menu"
+            style={{ left: Math.max(8, Math.min(menu.x, window.innerWidth - 224)), top: Math.max(8, Math.min(menu.y, window.innerHeight - 470)) }}
+          >
+            <div className="ctx-head">{menu.ids.length > 1 ? `已选 ${menu.ids.length} 条` : videoPage.items.find((v) => v.id === menu.ids[0])?.file_name ?? "影片"}</div>
+            {menu.ids.length === 1 && (
+              <>
+                <button onClick={() => { setDetailId(menu.ids[0]); setMenu(null); }}><Icon name="info" size={14} />查看详情</button>
+                <button onClick={() => { const id = menu.ids[0]; setMenu(null); void openById(id); }}><Icon name="play" size={14} />直接播放</button>
+                <button onClick={() => runAction("edit.rename")}><Icon name="edit" size={14} />重命名</button>
+                <button onClick={() => runAction("fav.toggle")}><Icon name="heart" size={14} />收藏 / 取消收藏</button>
+                <button disabled={menuBusy} onClick={async () => {
+                  setMenuBusy(true);
+                  try { await api.revealVideo(menu.ids[0]); setMenu(null); }
+                  catch (e) { notify(String(e)); } finally { setMenuBusy(false); }
+                }}><Icon name="folder" size={14} />在资源管理器中定位</button>
+              </>
+            )}
+            <button onClick={() => runAction("edit.move")}><Icon name="moveIn" size={14} />移动到文件夹…</button>
+            {activeCollection && (
+              <button onClick={async () => {
+                try {
+                  for (const id of menu.ids) await api.setCollection(activeCollection, id, false);
+                  notify(`已从「${activeCollection}」移出 ${menu.ids.length} 条`); setMenu(null);
+                  await Promise.all([refreshMeta(), loadVideos(true)]);
+                } catch (e) { notify(String(e)); }
+              }}><Icon name="x" size={14} />从当前合集移出</button>
+            )}
+            <div className="ctx-caption">移入 / 移出合集</div>
+            <div className="ctx-colls">
+              {activeCollections.filter((c) => c.kind === "custom").map((c) => {
+                const first = videoPage.items.find((v) => v.id === menu.ids[0]);
+                const has = !!first?.collections.includes(c.name);
+                return (
+                  <button key={c.id} className={has ? "on" : ""} onClick={async () => {
+                    try {
+                      for (const id of menu.ids) await api.setCollection(c.id, id, !has);
+                      notify(has ? `已从「${c.name}」移出` : `已加入「${c.name}」`); setMenu(null);
+                      await Promise.all([refreshMeta(), loadVideos(true)]);
+                    } catch (e) { notify(String(e)); }
+                  }}>{has ? "✓ " : ""}{c.name}</button>
+                );
+              })}
+              {activeCollections.filter((c) => c.kind === "custom").length === 0 && <span className="muted">还没有手动合集</span>}
+            </div>
+            <button disabled={menuBusy} onClick={async () => {
+              setMenuBusy(true);
+              try {
+                const path = await api.compressVideos(menu.ids);
+                notify(`已打包到 ${path}（原文件保留，点「扫描库」登记压缩包）`);
+                setMenu(null);
+              } catch (e) { notify(String(e)); } finally { setMenuBusy(false); }
+            }}><Icon name="zip" size={14} />{menuBusy ? "压缩中…" : "压缩为 zip（保留原文件）"}</button>
+            <button className="danger" onClick={() => runAction("edit.trash")}><Icon name="trash" size={14} />移入影匣回收站</button>
+          </div>
+        </>
+      )}
+
+      {renameTarget && (
+        <RenameDialog
+          video={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onDone={(v) => {
+            setVideoPage((prev) => ({ ...prev, items: prev.items.map((it) => (it.id === v.id ? v : it)) }));
+            void refreshMeta();
+          }}
+          notify={notify}
+        />
+      )}
+
       {moveIds && (
         <MoveDialog
           ids={moveIds}
@@ -944,10 +1190,13 @@ export default function App() {
       {player && (
         <Player
           info={player}
+          immersive={immersive}
+          onToggleImmersive={(on) => void setImmersiveMode(on)}
           onClose={() => {
             const id = player?.video.id;
             if (player?.source === "mpv") void api.mpvClose();
             setPlayer(null);
+            if (immersive) void setImmersiveMode(false);
             void refreshMeta();
             if (id) void syncAfterPlay(id); else void loadVideos(true);
           }}
@@ -961,7 +1210,7 @@ export default function App() {
       )}
 
       {settingsOpen && (
-        <SettingsModal settings={settings} setSettings={setSettings} onClose={() => setSettingsOpen(false)} notify={notify} />
+        <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} onClose={() => setSettingsOpen(false)} notify={notify} />
       )}
 
       {sheetOpen && (
@@ -1092,19 +1341,36 @@ function ImportHud({
 }
 
 function SettingsModal({
-  settings, setSettings, onClose, notify,
+  settings, setSettings, keymap, setKeymap, onClose, notify,
 }: {
   settings: Settings;
   setSettings: (s: Settings) => void;
+  keymap: KeyMap;
+  setKeymap: (m: KeyMap) => void;
   onClose: () => void;
   notify: (m: string) => void;
 }) {
   const [draft, setDraft] = useState<Settings>(settings);
+  const [recording, setRecording] = useState<ActionId | null>(null);
   const [appVersion, setAppVersion] = useState("");
   useEffect(() => {
     // 界面内可自查版本号：更新是否生效一目了然
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") { setRecording(null); return; }
+      const combo = comboFromEvent(e);
+      if (!combo) return;
+      const next = bindAction(keymap, recording, combo);
+      saveKeyMap(next); setKeymap(next); setRecording(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, keymap, setKeymap]);
   const save = async () => {
     try {
       await api.updateSettings(draft);
@@ -1168,6 +1434,41 @@ function SettingsModal({
             <label>mpv 可执行文件路径（可选）</label>
             <input value={draft.mpv_path || ""} placeholder="留空则自动探测；例如 D:\\TOOLS\\mpv\\mpv.exe"
               onChange={(e) => setDraft((d) => ({ ...d, mpv_path: e.target.value || null }))} />
+          </div>
+          <div className="field">
+            <label>画廊双击</label>
+            <select value={draft.double_click || "play"} onChange={(e) => setDraft((d) => ({ ...d, double_click: e.target.value }))}>
+              <option value="play">直接播放（推荐）</option>
+              <option value="detail">打开详情抽屉</option>
+            </select>
+            <p className="hint">单击始终是选中并打开详情；双击走这里的设置。</p>
+          </div>
+          <div className="field setting-checks">
+            <label><input type="checkbox" checked={!!draft.immersive_default} onChange={(e) => setDraft((d) => ({ ...d, immersive_default: e.target.checked }))} />播放默认无边框沉浸</label>
+            <label><input type="checkbox" checked={draft.show_card_info !== false} onChange={(e) => setDraft((d) => ({ ...d, show_card_info: e.target.checked }))} />卡片显示文件名与信息</label>
+          </div>
+          <div className="field keymap-field">
+            <label>快捷键（默认全部未绑定，点右侧录制）</label>
+            <p className="hint">输入框里打字不会触发快捷键；Esc 取消录制。同一个组合只保留最后一个绑定。</p>
+            <div className="keymap-list">
+              {(["排序", "播放", "选择与收藏", "文件", "界面"] as const).map((group) => (
+                <div className="keymap-group" key={group}>
+                  <div className="keymap-group-title">{group}</div>
+                  {ACTIONS.filter((a) => a.group === group).map((a) => (
+                    <div className="keymap-row" key={a.id}>
+                      <span title={a.hint || a.label}>{a.label}</span>
+                      <button className={`keymap-key ${recording === a.id ? "rec" : ""}`} onClick={() => setRecording(a.id)}>
+                        {recording === a.id ? "按下组合键…" : keymap[a.id] || "未绑定（点击录制）"}
+                      </button>
+                      {keymap[a.id] && <button className="keymap-clear" title="清除绑定" onClick={() => {
+                        const next = unbindAction(keymap, a.id);
+                        saveKeyMap(next); setKeymap(next);
+                      }}><Icon name="x" size={12} /></button>}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>
           <p className="hint">修改 ffmpeg 路径后需重启影匣生效。影片文件不会被移动或上传。</p>
         </div>

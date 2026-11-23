@@ -464,6 +464,13 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<VideoItem, String> {
     conn.query_row(&sql, params![id], map_video).map_err(|e| e.to_string())
 }
 
+/// 最近加入：批量导入的 added_at 常常整批相同，用 mtime/id 兜底，
+/// 否则 SQLite 在同值时顺序不定，新导入的视频会被挤到后面看不见。
+fn added_order(desc: bool) -> String {
+    let d = if desc { "DESC" } else { "ASC" };
+    format!("v.added_at {d}, v.mtime {d}, v.id {d}")
+}
+
 pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, String> {
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(48).clamp(1, 200);
@@ -520,17 +527,18 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
                     if desc { "DESC" } else { "ASC" }
                 )
             } else {
-                format!("v.added_at {}", if desc { "DESC" } else { "ASC" })
+                added_order(desc)
             }
         }
         "title" => format!("v.file_name COLLATE NOCASE {}", if desc { "DESC" } else { "ASC" }),
+        "folder" => format!("v.path COLLATE NOCASE {}", if desc { "DESC" } else { "ASC" }),
         "size" => format!("v.size_bytes {}", if desc { "DESC" } else { "ASC" }),
         "mtime" => format!("v.mtime {}", if desc { "DESC" } else { "ASC" }),
         "watched" => format!("v.last_watched_at {}", if desc { "DESC" } else { "ASC" }),
         "count" => format!("v.watch_count {}", if desc { "DESC" } else { "ASC" }),
         "duration" => format!("v.duration_sec {}", if desc { "DESC" } else { "ASC" }),
         "rating" => format!("v.rating {}", if desc { "DESC" } else { "ASC" }),
-        _ => format!("v.added_at {}", if desc { "DESC" } else { "ASC" }),
+        _ => added_order(desc),
     };
     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
         binds.iter().map(|b| b.as_ref()).collect();
@@ -2269,9 +2277,9 @@ mod tests {
         assert_eq!(names("-mtime"), vec!["b.mp4", "c.mp4", "a.mp4"], "-mtime 取反");
         assert_eq!(names("title"), vec!["a.mp4", "b.mp4", "c.mp4"], "title 默认升序");
         assert_eq!(names("-title"), vec!["c.mp4", "b.mp4", "a.mp4"], "-title 降序");
-        // added 三条同秒入库时次序不稳，只验证两个方向都能查通
-        assert_eq!(names("added").len(), 3);
-        assert_eq!(names("-added").len(), 3);
+        // 批量导入时 added_at 整批相同：用 mtime 兜底，最近改过的排前面
+        assert_eq!(names("added"), vec!["a.mp4", "c.mp4", "b.mp4"], "同秒入库按 mtime 兜底");
+        assert_eq!(names("-added"), vec!["b.mp4", "c.mp4", "a.mp4"], "逆序也稳定");
 
         drop(ctx);
         let _ = fs::remove_dir_all(&root);

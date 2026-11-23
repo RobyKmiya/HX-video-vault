@@ -1,4 +1,5 @@
 import type { DragEvent, MouseEvent } from "react";
+import { useRef } from "react";
 import { Icon } from "./Icons";
 import { useCoverSrc } from "../cover";
 import { formatBytes, formatDuration, relativeTime, thumbRatio } from "../format";
@@ -10,6 +11,10 @@ interface Props {
   onOpen: (v: VideoItem, edit: boolean) => void;
   onPlay: (v: VideoItem) => void;
   onSelect: (v: VideoItem, ev: MouseEvent) => void;
+  /** 画廊双击行为（设置页可改）：默认直接播放，detail = 打开详情 */
+  doubleClick?: "play" | "detail";
+  /** 卡片下方是否显示文件名与元信息（设置页可关，纯封面墙） */
+  showInfo?: boolean;
   /** 收藏夹视图手动排序时的拖拽能力（缺省 = 不可拖） */
   dragEnabled?: boolean;
   onDragStart?: (v: VideoItem, e: DragEvent<HTMLElement>) => void;
@@ -21,6 +26,7 @@ interface Props {
 
 export function VideoCard({
   video, selected, onOpen, onPlay, onSelect,
+  doubleClick = "play", showInfo = true,
   dragEnabled, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
 }: Props) {
   const progress = video.duration_sec > 0
@@ -32,12 +38,30 @@ export function VideoCard({
   const ratio = thumbRatio(video.width, video.height);
   const portrait = video.width > 0 && video.height > video.width;
 
+  // 单击开详情、双击直接播放：单击先挂一个 220ms 的定时器，双击时撤掉，避免详情先跳出来闪一下
+  const openTimer = useRef<number | null>(null);
+  const openDeferred = () => {
+    if (openTimer.current) window.clearTimeout(openTimer.current);
+    openTimer.current = window.setTimeout(() => {
+      openTimer.current = null;
+      onOpen(video, false);
+    }, 220);
+  };
+  const playNow = () => {
+    if (openTimer.current) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+    if (doubleClick === "play") onPlay(video);
+    else onOpen(video, false);
+  };
+
   return (
     <article
       className={`video-card ${selected ? "selected" : ""}`}
       data-video-id={video.id}
       onClick={(e) => onSelect(video, e)}
-      onDoubleClick={() => onOpen(video, false)}
+      onDoubleClick={playNow}
       draggable={dragEnabled || undefined}
       onDragStart={(e) => onDragStart?.(video, e)}
       onDragOver={(e) => onDragOver?.(video, e)}
@@ -45,7 +69,7 @@ export function VideoCard({
       onDrop={(e) => onDrop?.(video, e)}
       onDragEnd={(e) => onDragEnd?.(e)}
     >
-      <div className={`card-thumb ${portrait ? "portrait" : ""}`} style={{ aspectRatio: ratio }} onClick={() => onOpen(video, false)}>
+      <div className={`card-thumb ${portrait ? "portrait" : ""}`} style={{ aspectRatio: ratio }} onClick={openDeferred}>
         {cover ? (
           <img src={cover} alt="" loading="lazy" />
         ) : (
@@ -69,7 +93,7 @@ export function VideoCard({
         )}
         {video.completed && <span className="card-done"><Icon name="check" size={13} /></span>}
       </div>
-      <div className="card-body" onClick={() => onOpen(video, false)}>
+      {showInfo && <div className="card-body" onClick={openDeferred}>
         <div className="card-title" title={video.file_name}>{video.file_name}</div>
         <div className="card-meta">
           <span>{formatDuration(video.duration_sec)}</span>
@@ -86,7 +110,7 @@ export function VideoCard({
         <div className="card-sub" title={video.mtime > 0 ? "文件修改时间" : "加入影匣的时间"}>
           {video.mtime > 0 ? `改于 ${relativeTime(video.mtime)}` : `加入于 ${relativeTime(video.added_at)}`}
         </div>
-      </div>
+      </div>}
     </article>
   );
 }

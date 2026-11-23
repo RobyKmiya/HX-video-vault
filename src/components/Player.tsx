@@ -17,6 +17,9 @@ interface Props {
   onPrev: () => void;
   onChanged: () => void;
   onError: (msg: string) => void;
+  /** 无边框沉浸模式（窗口去系统框 + 全屏），由设置或快捷键开启 */
+  immersive?: boolean;
+  onToggleImmersive?: (on: boolean) => void;
 }
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3];
@@ -86,7 +89,7 @@ function loadPrefs(): PlayerPrefs {
   }
 }
 
-export function Player({ info, tags, collections, onClose, onNext, onPrev, onChanged, onError }: Props) {
+export function Player({ info, tags, collections, onClose, onNext, onPrev, onChanged, onError, immersive = false, onToggleImmersive }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -251,6 +254,18 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     if (videoRef.current) videoRef.current.playbackRate = next;
   }, [isMpv]);
 
+  // 设置页录制的快捷键在 App 里转成这个事件，播放器自己处理播放动作
+  useEffect(() => {
+    const onAction = (e: Event) => {
+      const action = (e as CustomEvent<{ action: string }>).detail?.action;
+      if (action === "play.toggle") togglePlay();
+      else if (action === "play.speedUp") changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(speed) + 1)]);
+      else if (action === "play.speedDown") changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(speed) - 1)]);
+    };
+    window.addEventListener("vv-player-action", onAction);
+    return () => window.removeEventListener("vv-player-action", onAction);
+  }, [togglePlay, changeSpeed, speed]);
+
   const setMute = useCallback((next: boolean) => {
     setMuted(next);
     if (isMpv) { void api.mpvCommand("volume", next ? 0 : volume * 100); return; }
@@ -359,6 +374,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
         if (menu) { setMenu(null); return; }
         // 详情面板开着时，Esc 先收面板，再按一次才退出播放
         if (detailOpen) { setDetailOpen(false); return; }
+        if (immersive && onToggleImmersive) { onToggleImmersive(false); return; }
         onClose();
         return;
       }
@@ -378,7 +394,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onNext, onPrev, save, menu, togglePlay, seekBy, setMute, volume, muted, isMpv, detailOpen]);
+  }, [onClose, onNext, onPrev, save, menu, togglePlay, seekBy, setMute, volume, muted, isMpv, detailOpen, immersive, onToggleImmersive]);
 
   useEffect(() => () => save(true), [save]);
 
@@ -527,6 +543,15 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
           >
             <Icon name="info" size={18} />
           </button>
+          {onToggleImmersive && (
+            <button
+              className={`player-round ${immersive ? "on" : ""}`}
+              onClick={() => onToggleImmersive(!immersive)}
+              title={immersive ? "退出沉浸模式（Esc）" : "进入无边框沉浸模式"}
+            >
+              <Icon name={immersive ? "x" : "fullscreen"} size={18} />
+            </button>
+          )}
         </div>
       </div>
 

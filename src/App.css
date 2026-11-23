@@ -651,3 +651,44 @@ h1, h2, h3, p { margin: 0; }
 .move-row.here { background: var(--accent-soft); border-color: var(--accent); }
 .move-row.busy { border-color: var(--accent); }
 .move-row .nav-count { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+/* ---- 排序/合集画廊 ---- */
+.folder-mode-hint { margin: 10px 2px 16px; font-size: 12px; color: var(--muted); }
+.gallery-strip { margin-bottom: 14px; }
+.gallery-head-actions { display: flex; gap: 6px; }
+.gallery-head-actions .pill { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.gallery-head-actions .pill.on { border-color: var(--accent); color: var(--text); }
+.folder-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+
+/* ---- 右键菜单 ---- */
+.menu-shadow { position: fixed; inset: 0; z-index: 90; }
+.context-menu {
+  position: fixed; z-index: 91; width: 216px; max-height: 78vh; overflow-y: auto;
+  padding: 6px; border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--surface-2); box-shadow: 0 18px 48px rgba(0,0,0,.5);
+}
+.context-menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 9px; border: 0; border-radius: 7px; background: none;
+  color: var(--text); font-size: 13px; text-align: left; cursor: pointer;
+}
+.context-menu button:hover:not(:disabled) { background: var(--accent-soft); }
+.context-menu button:disabled { opacity: .5; cursor: default; }
+.context-menu button.danger { color: #ff8f80; }
+.ctx-head { padding: 6px 9px 8px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-caption { padding: 8px 9px 4px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); margin-top: 4px; }
+.ctx-colls { display: flex; flex-direction: column; max-height: 150px; overflow-y: auto; }
+.ctx-colls .muted { padding: 4px 9px; font-size: 12px; }
+.ctx-colls button.on { color: var(--accent); }
+
+/* ---- 设置页：显示与快捷键 ---- */
+.setting-checks { display: flex; gap: 22px; flex-wrap: wrap; }
+.setting-checks label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-weight: 400; }
+.keymap-list { max-height: 300px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--surface-2); }
+.keymap-group-title { margin: 8px 0 4px; font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+.keymap-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
+.keymap-row > span { flex: 1; }
+.keymap-key { min-width: 132px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 12px; cursor: pointer; }
+.keymap-key.rec { border-color: var(--accent); color: var(--accent); }
+.keymap-clear { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; }
+.keymap-clear:hover { background: var(--accent-soft); }

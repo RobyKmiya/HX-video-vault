@@ -54,7 +54,7 @@ pub fn split_ext(name: &str) -> (String, String) {
 }
 
 /// 目标目录里不重名的落盘名（同名自动 ` (2)`、` (3)`…）。
-fn unique_path(dir: &Path, want: &str) -> PathBuf {
+pub fn unique_path(dir: &Path, want: &str) -> PathBuf {
     let first = dir.join(want);
     if !first.exists() {
         return first;

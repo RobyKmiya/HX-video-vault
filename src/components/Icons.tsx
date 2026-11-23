@@ -6,7 +6,7 @@ type Name =
   | "settings" | "plus" | "x" | "down" | "left" | "right" | "refresh"
   | "volume" | "fullscreen" | "back" | "forward" | "camera" | "link"
   | "list" | "info" | "menu" | "filter" | "sparkle" | "external"
-  | "cut" | "merge" | "image" | "sortDir" | "edit" | "moveIn";
+  | "cut" | "merge" | "image" | "sortDir" | "edit" | "moveIn" | "zip";
 
 const PATHS: Record<Name, ReactElement> = {
   vault: <><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V6M15.5 12H18"/></>,
@@ -48,6 +48,7 @@ const PATHS: Record<Name, ReactElement> = {
   sortDir: <><path d="M7 20V5"/><path d="m4 8 3-3 3 3"/><path d="M17 4v15"/><path d="m14 16 3 3 3-3"/></>,
   edit: <><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="m13.5 6.5 3 3"/></>,
   moveIn: <><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M12 16.5V9.5"/><path d="m9.5 12 2.5-2.5 2.5 2.5"/></>,
+  zip: <><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M12 3v3M12 8v2M12 12v2M12 16v2"/><rect x="10.5" y="18" width="3" height="2" rx=".6"/></>,
 };
 
 export function Icon({

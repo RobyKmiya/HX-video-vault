@@ -37,9 +37,20 @@ pub struct Settings {
     /// 拖拽导入的根目录；空 = 库根下的 Supervideo（区间夹：每夹 200 个视频）
     #[serde(default)]
     pub import_root: Option<String>,
+    /// 画廊双击：play = 直接播放（默认），detail = 打开详情抽屉
+    #[serde(default = "default_double_click")]
+    pub double_click: String,
+    /// 播放时默认进入无边框沉浸模式
+    #[serde(default)]
+    pub immersive_default: bool,
+    /// 卡片下面是否显示文件名与信息
+    #[serde(default = "default_show_card_info")]
+    pub show_card_info: bool,
 }
 
 fn default_player_pref() -> String { "auto".into() }
+fn default_double_click() -> String { "play".into() }
+fn default_show_card_info() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -50,6 +61,9 @@ impl Default for Settings {
             player_pref: "auto".into(),
             mpv_path: None,
             import_root: None,
+            double_click: "play".into(),
+            immersive_default: false,
+            show_card_info: true,
         }
     }
 }
@@ -1355,6 +1369,74 @@ fn reveal_video(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     fileops::reveal(Path::new(&path))
 }
 
+/// 沉浸模式：去掉系统标题栏（画匣的沉浸阅读同款），退出时恢复。
+#[tauri::command]
+fn set_immersive(app: AppHandle, on: bool) -> Result<(), String> {
+    let win = app.get_webview_window("main").ok_or("找不到主窗口")?;
+    win.set_decorations(!on).map_err(|e| format!("切换边框失败：{e}"))?;
+    win.set_fullscreen(on).map_err(|e| format!("切换全屏失败：{e}"))?;
+    Ok(())
+}
+
+/// 把所选视频打包成一个 zip（**保留原文件**），落在第一条所在目录，返回压缩包路径。
+/// 压缩包内条目（entry_index>0）跳过 —— 不能再套一层。
+#[tauri::command]
+fn compress_videos(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    name: Option<String>,
+) -> Result<String, String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for id in ids {
+        let Ok((path, entry_index)) = db::video_source(&lib.conn, id) else { continue };
+        if entry_index > 0 {
+            continue;
+        }
+        let p = PathBuf::from(path);
+        if !p.is_file() {
+            continue;
+        }
+        let inner = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        files.push((p, inner));
+    }
+    if files.is_empty() {
+        return Err("没有可压缩的文件（压缩包内的条目不能再次打包）".into());
+    }
+    let dir = files[0].0.parent().ok_or("取不到目标目录")?.to_path_buf();
+    let stem = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| fileops::validate_name(s).unwrap_or_else(|_| "打包".to_string()))
+        .unwrap_or_else(|| "打包".to_string());
+    let zip_path = fileops::unique_path(&dir, &format!("{stem}.zip"));
+    let file = fs::File::create(&zip_path).map_err(|e| format!("创建压缩包失败：{e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    for (path, inner) in &files {
+        use std::io::{Read, Write as IoWrite};
+        zip.start_file(inner.as_str(), opts)
+            .map_err(|e| format!("写入「{inner}」失败：{e}"))?;
+        let mut src = fs::File::open(path).map_err(|e| format!("读取失败：{e}"))?;
+        loop {
+            let n = src.read(&mut buf).map_err(|e| format!("读取中断：{e}"))?;
+            if n == 0 {
+                break;
+            }
+            zip.write_all(&buf[..n]).map_err(|e| format!("写入中断：{e}"))?;
+        }
+    }
+    zip.finish().map_err(|e| format!("收尾失败：{e}"))?;
+    Ok(zip_path.to_string_lossy().to_string())
+}
+
 // ---------- 收藏夹排序 ----------
 
 /// 主页层级浏览：某层下的 auto 子文件夹卡（parent=None 取顶层）。
@@ -1519,6 +1601,8 @@ pub fn run() {
             rename_video,
             move_videos,
             reveal_video,
+            set_immersive,
+            compress_videos,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

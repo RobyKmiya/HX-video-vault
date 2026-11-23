@@ -135,6 +135,12 @@ export interface Settings {
   mpv_path: string | null;
   /** 拖拽导入根目录；空 = 库根下的 Supervideo（区间夹 0-199 / 200-399…，每夹 200 个） */
   import_root?: string | null;
+  /** 画廊双击行为：play = 直接播放（默认），detail = 打开详情 */
+  double_click?: string;
+  /** 播放时默认进入无边框沉浸模式 */
+  immersive_default?: boolean;
+  /** 卡片下方是否显示文件名与时长/大小 */
+  show_card_info?: boolean;
 }
 
 /** 移动对话框的目标文件夹（库根 + 各 auto 文件夹） */
