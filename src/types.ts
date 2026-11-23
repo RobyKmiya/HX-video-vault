@@ -137,6 +137,13 @@ export interface Settings {
   import_root?: string | null;
 }
 
+/** 移动对话框的目标文件夹（库根 + 各 auto 文件夹） */
+export interface MoveTarget {
+  name: string;
+  path: string;
+  count: number;
+}
+
 /** 拖拽导入队列现场（后端 import-progress 事件 / import_status 命令） */
 export interface ImportStatus {
   running: boolean;

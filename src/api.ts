@@ -10,6 +10,7 @@ import type {
   ImportStatus,
   LibraryInfo,
   MediaMeta,
+  MoveTarget,
   ResolveReport,
   PlaybackInfo,
   ScanReport,
@@ -120,4 +121,12 @@ export const api = {
   /** 文件夹视图手动刷新封面：只重置这个夹的缓存图（不全库慢扫），返回被重置的成员 id */
   resetFolderCovers: (collectionId: number) =>
     invoke<number[]>("reset_folder_covers", { collectionId }),
+  /** 原地重命名（只改文件名，不动文件内容与封面缓存），返回更新后的整条 */
+  renameVideo: (id: number, name: string) => invoke<VideoItem>("rename_video", { id, name }),
+  /** 批量移动到库内某个绝对路径目录，返回成功条数 */
+  moveVideos: (ids: number[], target: string) => invoke<number>("move_videos", { ids, target }),
+  /** 移动目标：库根 + 所有 auto 文件夹 */
+  moveTargets: () => invoke<MoveTarget[]>("move_targets"),
+  /** 资源管理器里定位并选中该文件 */
+  revealVideo: (id: number) => invoke<void>("reveal_video", { id }),
 };

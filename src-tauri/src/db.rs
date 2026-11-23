@@ -1200,6 +1200,153 @@ pub fn collection_member_ids(conn: &Connection, collection_id: i64) -> Result<Ve
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+// ---------- 应用内文件编辑：改名 / 移动后的库内同步 ----------
+
+/// 绝对路径 → 相对库根的文件夹名（"A › B"）；库根直放或不在库里返回 None。
+fn rel_dir_of(root: &Path, path: &str) -> Option<String> {
+    let root_str = root.to_string_lossy();
+    let rel = path.strip_prefix(root_str.as_ref())?.trim_start_matches(['\\', '/']);
+    let idx = rel.rfind(['\\', '/'])?;
+    if idx == 0 {
+        return None;
+    }
+    Some(rel[..idx].replace(['\\', '/'], " › "))
+}
+
+fn auto_collection_id(conn: &Connection, name: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT id FROM collections WHERE name=?1 AND kind='auto'",
+        params![name],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 取（必要时建）某个目录对应的 auto 镜像夹；被软删过的一并复活。
+fn ensure_auto_collection(conn: &Connection, name: &str) -> Result<i64, String> {
+    let group = name.split(" › ").next().unwrap_or("").to_string();
+    conn.execute(
+        "INSERT OR IGNORE INTO collections (name, kind, group_name) VALUES (?1, 'auto', ?2)",
+        params![name, group],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE collections SET deleted_at=0 WHERE name=?1 AND kind='auto'",
+        params![name],
+    )
+    .map_err(|e| e.to_string())?;
+    auto_collection_id(conn, name)
+}
+
+/// 目录夹空了就删掉（文件夹是唯一事实源：没视频的夹不该留在侧栏）。
+fn prune_empty_auto(conn: &Connection, collection_id: i64) -> Result<(), String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM collection_videos WHERE collection_id=?1",
+            params![collection_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        conn.execute(
+            "DELETE FROM collections WHERE id=?1 AND kind='auto'",
+            params![collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 一条视频的源路径与包内序号（改名/移动/定位前取原始位置）。
+pub fn video_source(conn: &Connection, id: i64) -> Result<(String, i64), String> {
+    conn.query_row("SELECT path, entry_index FROM videos WHERE id=?1", params![id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })
+    .map_err(|e| format!("找不到这条视频：{e}"))
+}
+
+/// 文件被改名/移动后同步库：更新 path / file_name / container / mtime，
+/// 并把自动镜像夹的成员关系从旧文件夹搬到新文件夹（新夹不存在就建，旧夹空了就删）。
+/// 只碰这一条记录，**不做全库扫描**——这是「改名移动不卡」的关键。
+pub fn apply_path_change(
+    conn: &Connection,
+    root: &Path,
+    video_id: i64,
+    new_path: &Path,
+) -> Result<(), String> {
+    let old_path: String = conn
+        .query_row("SELECT path FROM videos WHERE id=?1", params![video_id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let new_str = new_path.to_string_lossy().to_string();
+    let file_name = new_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let container = new_path
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mtime = crate::fileops::mtime_secs(new_path);
+
+    conn.execute(
+        "UPDATE videos SET path=?2, file_name=?3, container=?4, mtime=CASE WHEN ?5>0 THEN ?5 ELSE mtime END
+         WHERE id=?1",
+        params![video_id, new_str, file_name, container, mtime],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let old_dir = rel_dir_of(root, &old_path);
+    let new_dir = rel_dir_of(root, &new_str);
+    if old_dir == new_dir {
+        return Ok(()); // 同目录改名：夹不变
+    }
+
+    if let Some(name) = old_dir.as_deref() {
+        if let Ok(cid) = auto_collection_id(conn, name) {
+            conn.execute(
+                "DELETE FROM collection_videos WHERE collection_id=?1 AND video_id=?2",
+                params![cid, video_id],
+            )
+            .map_err(|e| e.to_string())?;
+            prune_empty_auto(conn, cid)?;
+        }
+    }
+    if let Some(name) = new_dir.as_deref() {
+        let cid = ensure_auto_collection(conn, name)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, added_at, position)
+             VALUES (?1, ?2, ?3,
+                     COALESCE((SELECT MAX(position)+1 FROM collection_videos WHERE collection_id=?1), 0))",
+            params![cid, video_id, now_secs()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 侧栏「库根」与所有 auto 文件夹，供移动对话框选择目标（按名字排序）。
+pub fn list_move_targets(conn: &Connection, root: &Path) -> Result<Vec<(String, String, i64)>, String> {
+    let root_str = root.to_string_lossy().to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.name, COUNT(cv.video_id)
+             FROM collections c LEFT JOIN collection_videos cv ON cv.collection_id=c.id
+             WHERE c.kind='auto' AND c.deleted_at=0
+             GROUP BY c.id ORDER BY c.name",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<(String, String, i64)> = Vec::new();
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.filter_map(Result::ok) {
+        let (name, count) = row;
+        let abs = format!("{}{}{}", root_str, std::path::MAIN_SEPARATOR, name.replace(" › ", &std::path::MAIN_SEPARATOR.to_string()));
+        out.push((name, abs, count));
+    }
+    Ok(out)
+}
+
 /// 收藏夹内视频拖拽排序。前端只传当前可见子集的新顺序：
 /// 未出现在子集里的成员整体后移 subset 长度（保持原有相对次序），避免位次冲突。
 pub fn reorder_collection_videos(
@@ -2029,6 +2176,66 @@ mod tests {
         assert_eq!(n, 2, "重复打开不得再次迁移");
 
         drop(ctx2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 改名/移动后只动这一条：路径、文件名、mtime 跟着走；auto 镜像夹成员搬到新夹，旧夹空了消失。
+    #[test]
+    fn apply_path_change_relinks_auto_folder() {
+        let (root, ctx) = temp_lib();
+        // 起始状态：文件在库根（没有文件夹），像「刚导入还没扫描」那种
+        let src = root.join("a.mp4");
+        fs::write(&src, b"x").unwrap();
+        let mut r = rec(&src.to_string_lossy(), 0);
+        r.file_name = "a.mp4".into();
+        upsert_video(&ctx.conn, &r).unwrap();
+        let id: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path=?1", params![src.to_string_lossy().to_string()], |x| x.get(0))
+            .unwrap();
+
+        let folder_of = |id: i64| -> String {
+            ctx.conn
+                .query_row(
+                    "SELECT c.name FROM collections c JOIN collection_videos cv ON cv.collection_id=c.id WHERE cv.video_id=?1",
+                    params![id],
+                    |x| x.get(0),
+                )
+                .unwrap_or_default()
+        };
+
+        // 移动到 0-199：建夹 + 入成员
+        fs::create_dir_all(root.join("0-199")).unwrap();
+        let dst0 = root.join("0-199").join("a.mp4");
+        fs::rename(&src, &dst0).unwrap();
+        apply_path_change(&ctx.conn, &root, id, &dst0).unwrap();
+        assert_eq!(folder_of(id), "0-199");
+
+        // 移到 200-399：成员跟着搬，旧夹空了自动消失
+        fs::create_dir_all(root.join("200-399")).unwrap();
+        let dst = root.join("200-399").join("a.mp4");
+        fs::rename(&dst0, &dst).unwrap();
+        apply_path_change(&ctx.conn, &root, id, &dst).unwrap();
+        assert_eq!(folder_of(id), "200-399");
+        let old_left: i64 = ctx
+            .conn
+            .query_row("SELECT COUNT(*) FROM collections WHERE name='0-199' AND kind='auto'", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(old_left, 0, "空掉的镜像夹应删除");
+
+        // 同目录改名：文件名/路径更新，所在夹不变
+        let dst2 = root.join("200-399").join("b.mp4");
+        fs::rename(&dst, &dst2).unwrap();
+        apply_path_change(&ctx.conn, &root, id, &dst2).unwrap();
+        let (path, name): (String, String) = ctx
+            .conn
+            .query_row("SELECT path, file_name FROM videos WHERE id=?1", params![id], |x| Ok((x.get(0)?, x.get(1)?)))
+            .unwrap();
+        assert!(path.ends_with("b.mp4"));
+        assert_eq!(name, "b.mp4");
+        assert_eq!(folder_of(id), "200-399");
+
+        drop(ctx);
         let _ = fs::remove_dir_all(&root);
     }
 

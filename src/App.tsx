@@ -12,6 +12,7 @@ import { StatsPanel } from "./components/StatsPanel";
 import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { EditPanel } from "./components/EditPanel";
+import { MoveDialog } from "./components/MoveDialog";
 import { api } from "./api";
 import { resetCovers } from "./cover";
 import { formatBytes } from "./format";
@@ -98,6 +99,8 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
+  // 批量移动对话框：非空即打开（值为待移动的 id）
+  const [moveIds, setMoveIds] = useState<number[] | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -819,6 +822,13 @@ export default function App() {
                     notify(`已把 ${ids.length} 条加入待看`); await refreshMeta();
                   } catch (e) { notify(String(e)); }
                 }}><Icon name="list" size={14} />加入待看</button>
+                <button
+                  className="btn small"
+                  onClick={() => setMoveIds([...selected])}
+                  title="把所选视频移动到库内另一个文件夹（同盘瞬时完成，封面不重抽）"
+                >
+                  <Icon name="moveIn" size={14} />移动到…
+                </button>
                 <select className="select small-select" value="" onChange={async (e) => {
                   const id = Number(e.target.value);
                   if (!id) return;
@@ -906,7 +916,28 @@ export default function App() {
           onPlay={(v) => void openPlayer(v)}
           onEdit={(v) => { setEditPrefill([v]); setEditOpen(true); setDetailId(null); }}
           onChanged={() => { void refreshMeta(); void loadVideos(true); }}
+          onVideoUpdated={(v) => {
+            // 就地替换这一张卡：改名不重载列表，滚动位置和分页都不动
+            setVideoPage((prev) => ({ ...prev, items: prev.items.map((it) => (it.id === v.id ? v : it)) }));
+            void refreshMeta();
+          }}
           onError={notify}
+          notify={notify}
+        />
+      )}
+
+      {moveIds && (
+        <MoveDialog
+          ids={moveIds}
+          currentPath={videoPage.items.find((v) => v.id === moveIds[0])?.path}
+          onClose={() => setMoveIds(null)}
+          onDone={() => {
+            setMoveIds(null);
+            setSelected(new Set());
+            void loadVideos(true);
+            void refreshMeta();
+          }}
+          notify={notify}
         />
       )}
 

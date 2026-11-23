@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
+import { MoveDialog } from "./MoveDialog";
 import { bustCover, useCoverSrc } from "../cover";
 import { api } from "../api";
 import { formatBytes, formatDate, formatDuration, relativeTime, thumbRatio } from "../format";
@@ -15,7 +16,11 @@ interface Props {
   /** 不传（播放页内嵌形态）就不显示剪辑按钮 */
   onEdit?: (v: VideoItem) => void;
   onChanged: () => void;
+  /** 单条被就地改过（改名等）：只替换这一张卡，不重载列表、不丢滚动位置 */
+  onVideoUpdated?: (v: VideoItem) => void;
   onError: (msg: string) => void;
+  /** 成功提示（不传就用 onError 那个 toast 通道） */
+  notify?: (msg: string) => void;
   /** 嵌入播放页时用：不自适应宽度、不折叠、不带加宽按钮 */
   embedded?: boolean;
 }
@@ -40,7 +45,8 @@ function readWidth(): number {
   return window.innerWidth < 1180 ? 340 : 384;
 }
 
-export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit, onChanged, onError, embedded = false }: Props) {
+export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit, onChanged, onVideoUpdated, onError, notify, embedded = false }: Props) {
+  const say = notify ?? onError;
   const [note, setNote] = useState(video.note);
   const [rating, setRating] = useState(video.rating);
   const [favorite, setFavorite] = useState(video.favorite);
@@ -48,6 +54,11 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
   const [addedTag, setAddedTag] = useState("");
   const [newFav, setNewFav] = useState("");
   const [busy, setBusy] = useState(false);
+  // 应用内文件操作：改名 / 移动 / 定位
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [opBusy, setOpBusy] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
   const [mode, setMode] = useState<DrawerMode>(readMode);
   const [width, setWidth] = useState<number>(readWidth);
   const [resizing, setResizing] = useState(false);
@@ -159,6 +170,50 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
     }
   };
 
+  // 文件名拆成「主名 + 扩展名」：改名只让改主名，扩展名固定，免得播放器不认
+  const dotIdx = video.file_name.lastIndexOf(".");
+  const nameExt = dotIdx > 0 ? video.file_name.slice(dotIdx) : "";
+  const nameStem = dotIdx > 0 ? video.file_name.slice(0, dotIdx) : video.file_name;
+  const isArchiveEntry = video.entry_index > 0;
+
+  const startRename = () => {
+    setNameDraft(nameStem);
+    setRenaming(true);
+  };
+
+  const doRename = async () => {
+    const raw = nameDraft.trim();
+    if (!raw) {
+      say("文件名不能为空");
+      return;
+    }
+    const next = raw + nameExt;
+    if (next === video.file_name) {
+      setRenaming(false);
+      return;
+    }
+    setOpBusy(true);
+    try {
+      const updated = await api.renameVideo(video.id, next);
+      setRenaming(false);
+      say(`已改名为「${updated.file_name}」`);
+      if (onVideoUpdated) onVideoUpdated(updated);
+      else onChanged();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setOpBusy(false);
+    }
+  };
+
+  const reveal = async () => {
+    try {
+      await api.revealVideo(video.id);
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
   const cover = useCoverSrc(video);
   const coverRatio = thumbRatio(video.width, video.height);
   const watchedPercent = video.duration_sec > 0
@@ -233,6 +288,61 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
 
         <h2 className="detail-title">{video.file_name}</h2>
         <div className="detail-path" title={video.path}>{video.path}</div>
+
+        <div className="detail-section fileops">
+          <div className="section-title">文件</div>
+          {renaming ? (
+            <div className="rename-row">
+              <input
+                className="rename-input"
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void doRename();
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+                autoFocus
+                placeholder="新的文件名（扩展名不变）"
+                spellCheck={false}
+              />
+              <span className="rename-ext">{nameExt}</span>
+              <button className="btn small primary" onClick={() => void doRename()} disabled={opBusy}>
+                {opBusy ? "改名中…" : "确定"}
+              </button>
+              <button className="btn small" onClick={() => setRenaming(false)} disabled={opBusy}>取消</button>
+            </div>
+          ) : (
+            <div className="fileops-row">
+              <button
+                className="btn small"
+                onClick={startRename}
+                disabled={isArchiveEntry}
+                title={isArchiveEntry ? "压缩包内的条目不能单独改名" : "只改文件名：同目录改名，毫秒级，封面缓存不受影响"}
+              >
+                <Icon name="edit" size={14} />重命名
+              </button>
+              <button
+                className="btn small"
+                onClick={() => setMoveOpen(true)}
+                disabled={isArchiveEntry}
+                title={isArchiveEntry ? "压缩包内的条目不能单独移动" : "移动到库内其他文件夹（同盘瞬时完成）"}
+              >
+                <Icon name="moveIn" size={14} />移动
+              </button>
+              <button
+                className="btn small"
+                onClick={() => void reveal()}
+                disabled={isArchiveEntry}
+                title="在资源管理器里定位（不播放）"
+              >
+                <Icon name="folder" size={14} />定位
+              </button>
+            </div>
+          )}
+          {isArchiveEntry && (
+            <p className="hint">压缩包里的条目共用同一个文件，改名/移动请直接对压缩包操作。</p>
+          )}
+        </div>
 
         {video.contact_sheet && (
           <div className="detail-sheet">
@@ -423,6 +533,16 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
           <p className="hint">只从库中移除记录，不会删除磁盘上的视频文件。</p>
         </div>
       </div>
+
+      {moveOpen && (
+        <MoveDialog
+          ids={[video.id]}
+          currentPath={video.path}
+          onClose={() => setMoveOpen(false)}
+          onDone={() => { setMoveOpen(false); onChanged(); }}
+          notify={say}
+        />
+      )}
     </aside>
   );
 }

@@ -1,6 +1,6 @@
 [package]
 name = "video-vault"
-version = "0.1.23"
+version = "0.1.24"
 description = "影匣 — 本地离线视频库与播放器"
 authors = ["Video Vault"]
 edition = "2024"
@@ -21,7 +21,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 walkdir = "2.5.0"
-zip = "2"
+zip = { version = "2", default-features = false, features = [
+    "aes-crypto",
+    "bzip2",
+    "deflate",
+    "deflate64",
+    "time",
+    "zstd",
+] }
 blake3 = "1.8.7"
 uuid = { version = "1.29.2", features = ["v4"] }
 natord = "1.0.9"

@@ -37,6 +37,8 @@ const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const doInstall = !argv.includes('--no-install');
 const skipTests = argv.includes('--no-test');
+/** 版本号已手工改好时用：只打包安装，不再写 package.json / Cargo.toml / tauri.conf.json */
+const noBump = argv.includes('--no-bump');
 const bumpKind = argv.includes('--minor') ? 'minor' : argv.includes('--major') ? 'major' : 'patch';
 const setIndex = argv.indexOf('--set');
 const explicitVersion = setIndex >= 0 ? argv[setIndex + 1] : null;
@@ -234,7 +236,7 @@ function warnIfDirty() {
 
 // ── 主流程 ────────────────────────────────────────────────
 const current = readVersion();
-const next = explicitVersion ?? bump(current, bumpKind);
+const next = noBump ? current : (explicitVersion ?? bump(current, bumpKind));
 if (explicitVersion && !/^\d+\.\d+\.\d+$/.test(explicitVersion)) {
   console.error(`版本号格式应为 x.y.z，收到：${explicitVersion}`);
   process.exit(1);
@@ -247,6 +249,10 @@ console.log(`  注意：只操作 ${PRODUCT}，不碰画匣及其库`);
 warnIfDirty();
 
 step(`抬版本并同步三处（package.json / Cargo.toml / tauri.conf.json）`, () => {
+  if (noBump) {
+    ok(`--no-bump：沿用当前版本 ${next}（三处已手工同步）`);
+    return;
+  }
   syncVersion(next);
   ok(`三处已同步为 ${next}`);
 });
@@ -265,7 +271,11 @@ step('打包（含 Rust release 编译 + NSIS）', () => {
   ok('安装包已生成');
 });
 
-const setupPath = path.join(TAURI_DIR, 'target', 'release', 'bundle', 'nsis', `${PRODUCT}_${next}_x64-setup.exe`);
+// 支持 CARGO_TARGET_DIR 覆盖（本机 target 目录曾被文件守卫锁死，重建时用新目录绕开）
+const TARGET_DIR = process.env.CARGO_TARGET_DIR
+  ? path.resolve(process.env.CARGO_TARGET_DIR)
+  : path.join(TAURI_DIR, 'target');
+const setupPath = path.join(TARGET_DIR, 'release', 'bundle', 'nsis', `${PRODUCT}_${next}_x64-setup.exe`);
 
 step('核对安装包', () => {
   if (!fs.existsSync(setupPath)) throw new Error(`找不到安装包：${setupPath}`);
