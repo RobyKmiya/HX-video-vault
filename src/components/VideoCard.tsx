@@ -2,7 +2,7 @@ import type { DragEvent, MouseEvent } from "react";
 import { useRef } from "react";
 import { Icon } from "./Icons";
 import { useCoverSrc } from "../cover";
-import { formatBytes, formatDuration, relativeTime, thumbRatio } from "../format";
+import { formatBytes, formatDuration, relativeTime } from "../format";
 import type { VideoItem } from "../types";
 
 interface Props {
@@ -35,8 +35,6 @@ export function VideoCard({
   // 自选封面 > 接触表 > 中间帧兜底（后端懒生成），失败回占位图
   const cover = useCoverSrc(video);
   const isArchive = video.entry_index > 0;
-  const ratio = thumbRatio(video.width, video.height);
-  const portrait = video.width > 0 && video.height > video.width;
 
   // 单击开详情、双击直接播放：单击先挂一个 220ms 的定时器，双击时撤掉，避免详情先跳出来闪一下
   const openTimer = useRef<number | null>(null);
@@ -69,7 +67,7 @@ export function VideoCard({
       onDrop={(e) => onDrop?.(video, e)}
       onDragEnd={(e) => onDragEnd?.(e)}
     >
-      <div className={`card-thumb ${portrait ? "portrait" : ""}`} style={{ aspectRatio: ratio }} onClick={openDeferred}>
+      <div className="card-thumb" onClick={openDeferred}>
         {cover ? (
           <img src={cover} alt="" loading="lazy" />
         ) : (

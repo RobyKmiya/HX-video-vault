@@ -237,16 +237,15 @@ export default function App() {
     pushLoc();
     setFolderPath(path);
     setSelected(new Set());
+    // 文件夹浏览模式下层层进入都要保持 folder，否则夹网格会在下一层消失
+    setSort((cur) => (cur === "folder" ? "folder" : path.length ? "manual" : "added"));
+    setSortRev(false);
     if (path.length) {
       setActiveCollection(path.join(" › "));
       setActiveTag(null);
       setView("all");
-      setSort("manual");
-      setSortRev(false);
     } else {
       setActiveCollection(null);
-      setSort("added");
-      setSortRev(false);
     }
   }, []);
 
@@ -927,7 +926,7 @@ export default function App() {
               </section>
             )}
 
-            {sort === "folder" && folders.length > 0 && (
+            {sort === "folder" && (
               <section className="folder-strip">
                 <div className="folder-strip-head">
                   <span className="section-title">{folderPath.length ? "子文件夹" : "文件夹"}</span>
@@ -937,7 +936,9 @@ export default function App() {
                   </span>
                 </div>
                 <div className="folder-grid">
-                  {[...folders]
+                  {folders.length === 0 ? (
+                    <p className="folder-mode-hint">这一层没有子文件夹了，下面显示本层影片。</p>
+                  ) : [...folders]
                     .sort((a, b) => (folderSort === "name"
                       ? a.leaf.localeCompare(b.leaf, "zh-CN")
                       : b.count - a.count))

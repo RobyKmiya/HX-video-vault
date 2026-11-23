@@ -181,17 +181,22 @@ h1, h2, h3, p { margin: 0; }
 .bulk-tags { width: 100%; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 6px; }
 
 /* ---------- video grid ---------- */
-/* 瀑布流：多列布局，竖屏/横屏卡片各按自身比例堆叠，不再行对齐留空 */
-.video-grid { columns: auto; column-width: 216px; column-gap: 16px; }
-.video-card { break-inside: avoid; margin-bottom: 16px; }
+/* 统一 16:9 对齐网格：所有缩略图同尺寸、同行对齐；竖屏靠 contain 两侧留黑，不再按视频比例撑成瀑布流 */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+  gap: 18px 16px;
+  align-items: start;
+}
 .video-card {
+  min-width: 0;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   overflow: hidden; display: block; width: 100%; transition: transform .18s, box-shadow .18s, border-color .18s; position: relative;
 }
 .video-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--line-strong); }
 .video-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-.card-thumb { aspect-ratio: 16/9; background: #242a35; position: relative; overflow: hidden; cursor: pointer; }
-/* 容器比例跟随视频本身，这里用 contain 保证竖屏也不会被裁掉上下 */
+/* 统一 16:9 框：横屏铺满，竖屏/超宽屏 contain 居中，两侧或上下留空，不再改变卡片高度 */
+.card-thumb { aspect-ratio: 16 / 9; background: #10141c; position: relative; overflow: hidden; cursor: pointer; }
 .card-thumb img { width: 100%; height: 100%; object-fit: contain; background: #10141c; display: block; transition: transform .3s; }
 .video-card:hover .card-thumb img { transform: scale(1.04); }
 .thumb-placeholder { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: rgba(255,255,255,.45); }
@@ -213,7 +218,11 @@ h1, h2, h3, p { margin: 0; }
 .card-progress { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: rgba(255,255,255,.25); }
 .card-progress span { display: block; height: 100%; background: var(--amber); }
 .card-body { padding: 10px 11px 12px; cursor: pointer; }
-.card-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 固定两行高度：不管文件名长短，整行卡片保持齐平 */
+.card-title {
+  font-size: 13px; font-weight: 600; line-height: 1.35; height: 2.7em;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .card-meta { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11.5px; margin-top: 5px; }
 .card-meta span { display: inline-flex; align-items: center; gap: 2px; }
 .dot-sep { opacity: .5; }
