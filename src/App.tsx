@@ -122,6 +122,12 @@ export default function App() {
   const [keymap, setKeymap] = useState<KeyMap>(() => loadKeyMap());
   // 鼠标手势槽位（双击画面 / Ctrl+滚轮）：和快捷键一样存本机，改完立即生效
   const [gestures, setGestures] = useState<GestureMap>(() => loadGestures());
+  // 侧栏宽度：拖得动、记得住（画匣同款，min/max 与 CSS 断点保持一致）。
+  // 必须放在上面的 !ready 早退**之前** —— 0.1.26 首发把它放在早退后面，
+  // ready 翻真之后 hooks 多出一个，直接 React #310 白屏（踩回了 0.1.19 的坑）。
+  const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistentSize(
+    "vv.layout.sidebar", 236, 190, 460,
+  );
   const [immersive, setImmersive] = useState(false);
   // 用户对「要不要无边框」的偏好：设置里的默认值打底。
   // 退播放只恢复窗口边框、**不清偏好**，所以下次进来还是按用户上次的选择走。
@@ -870,12 +876,6 @@ export default function App() {
   }
 
   const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
-
-  // 侧栏宽度：拖得动、记得住（画匣同款，min/max 与 CSS 断点保持一致）
-  const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistentSize(
-    "vv.layout.sidebar", 236, 190, 460,
-  );
-
 
   return (
     <div className="app-shell">
