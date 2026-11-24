@@ -33,6 +33,8 @@ h1, h2, h3, p { margin: 0; }
 .muted { color: var(--muted); font-size: 12.5px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 8px; }
+/* 快捷键录制时的提示（冲突 / 注册失败）要显眼，别让人以为已经绑上了 */
+.keymap-hint-warn { color: #ffb27a; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -129,6 +131,17 @@ h1, h2, h3, p { margin: 0; }
 .nav-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
 .sidebar-footer { border-top: 1px solid var(--line); padding-top: 8px; margin-top: auto; }
 
+/* 可拖分界线：视觉上是一条 2px 的线，手感上是 6px 宽的条 */
+.splitter { width: 6px; flex: 0 0 6px; cursor: col-resize; position: relative; z-index: 5; }
+.splitter::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px;
+  background: var(--line); transition: background .12s;
+}
+.splitter:hover::after, .splitter:focus-visible::after { background: var(--accent); }
+.splitter:focus-visible { outline: none; }
+body.is-splitting { cursor: col-resize; user-select: none; }
+body.is-splitting * { cursor: col-resize !important; }
+
 /* ---------- toolbar ---------- */
 .toolbar {
   position: sticky; top: 0; z-index: 20; background: rgba(246, 247, 249, .92);
@@ -215,7 +228,10 @@ h1, h2, h3, p { margin: 0; }
 }
 .card-badge.fav { right: 8px; color: #ff8fa3; }
 .card-badge.archive { left: 8px; }
-.card-badge.rating { right: 8px; color: #ffd166; }
+/* 评分徽章挪到收藏徽章下面一行：两个都在右上角会叠在一起 */
+.card-badge.rating { right: 8px; top: 26px; color: #ffd166; }
+/* 看到哪了：放在左下角，避开右上角的收藏/评分和底部的进度线 */
+.card-badge.resume { left: 8px; bottom: 10px; color: #cfd8e6; }
 .card-done { position: absolute; bottom: 8px; right: 8px; background: var(--ok); color: #fff; border-radius: 50%; padding: 3px; display: grid; place-items: center; }
 .card-progress { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: rgba(255,255,255,.25); }
 .card-progress span { display: block; height: 100%; background: var(--amber); }
@@ -353,6 +369,22 @@ h1, h2, h3, p { margin: 0; }
 .player-sub { color: #98a2b5; font-size: 11.5px; margin-top: 2px; }
 .player-controls { position: absolute; bottom: 0; left: 0; right: 0; padding: 30px 24px 18px; background: linear-gradient(transparent, rgba(0,0,0,.8)); transition: opacity .25s; }
 .player-controls.hidden { opacity: 0; pointer-events: none; }
+
+/* —— 无边框沉浸 ——
+ * 去掉系统标题栏之后，界面里那条顶栏也得让位：画面顶到屏幕最上沿，
+ * 只留顶部一条拖动热区（挪窗口）和右下角一颗几乎看不见的还原点。 */
+.player-overlay.is-immersive .player-top { display: none; }
+.player-overlay.is-immersive .player-stage { padding: 0; }
+.player-drag-strip { position: fixed; top: 0; left: 0; right: 0; height: 26px; z-index: 7; }
+.player-corner-toggle {
+  position: fixed; right: 0; bottom: 0; width: 64px; height: 64px; z-index: 7;
+  background: none; border: 0; padding: 0; cursor: pointer; opacity: .18; transition: opacity .15s;
+}
+.player-corner-toggle:hover { opacity: .9; }
+.player-corner-toggle span {
+  display: block; width: 9px; height: 9px; border-radius: 50%;
+  background: #fff; margin: 12px; box-shadow: 0 0 6px rgba(0, 0, 0, .7);
+}
 .seek { position: relative; height: 5px; border-radius: 3px; background: rgba(255,255,255,.25); cursor: pointer; margin-bottom: 14px; }
 .seek-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--amber); border-radius: 3px; }
 .seek-knob { position: absolute; top: 50%; width: 12px; height: 12px; background: #fff; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 1px 5px rgba(0,0,0,.4); }
@@ -458,6 +490,11 @@ h1, h2, h3, p { margin: 0; }
 .welcome-tips svg { color: var(--ok); }
 .link-btn { border: 0; background: none; color: var(--accent); font-size: 12px; margin-top: 14px; }
 .toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%); background: #1b2030; color: #fff; padding: 10px 16px; border-radius: 9px; font-size: 12.5px; display: flex; align-items: center; gap: 8px; z-index: 90; box-shadow: var(--shadow); max-width: 80vw; }
+.toast-msg { flex: 1; min-width: 0; }
+.toast-success { background: #16321f; border: 1px solid rgba(96, 200, 120, .35); }
+.toast-error { background: #33191d; border: 1px solid rgba(224, 79, 95, .45); }
+.toast-close { background: none; border: 0; color: inherit; opacity: .55; cursor: pointer; padding: 0 0 0 4px; display: grid; place-items: center; }
+.toast-close:hover { opacity: 1; }
 
 @media (max-width: 1180px) {
   .main { padding: 0 18px 50px; }
@@ -692,6 +729,16 @@ h1, h2, h3, p { margin: 0; }
 .ctx-colls .muted { padding: 4px 9px; font-size: 12px; }
 .ctx-colls button.on { color: var(--accent); }
 
+/* 播放器里的右键菜单：跟全局右键菜单同一套骨架，底色更暗一点，适配黑底画面 */
+.player-ctx { width: 232px; background: rgba(22, 24, 30, .98); border-color: #3a3a44; color: #e8ecf4; }
+.player-ctx .ctx-head { color: #8b95a7; border-bottom-color: #3a3a44; }
+.player-ctx .ctx-caption { border-top-color: #3a3a44; color: #8b95a7; }
+.player-ctx .ctx-caption-title { border-top: 0; padding-top: 10px; font-weight: 600; color: #cdd5e2; }
+.player-ctx button:hover:not(:disabled) { background: rgba(255, 255, 255, .1); }
+.ctx-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-check { color: var(--accent); font-size: 12px; }
+.ctx-hint { margin-left: auto; padding-left: 10px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+
 /* ---- 设置页：显示与快捷键 ---- */
 .setting-checks { display: flex; gap: 22px; flex-wrap: wrap; }
 .setting-checks label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-weight: 400; }
@@ -703,3 +750,8 @@ h1, h2, h3, p { margin: 0; }
 .keymap-key.rec { border-color: var(--accent); color: var(--accent); }
 .keymap-clear { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; }
 .keymap-clear:hover { background: var(--accent-soft); }
+/* 手势槽位的下拉：跟录制按钮同宽，视觉上是一列 */
+.keymap-select {
+  min-width: 132px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer; font-family: inherit;
+}

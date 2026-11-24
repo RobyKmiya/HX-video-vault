@@ -103,6 +103,12 @@ export function VideoCard({
         {video.favorite && <span className="card-badge fav"><Icon name="heart" size={13} /></span>}
         {isArchive && <span className="card-badge archive" title={`压缩包内第 ${video.entry_index + 1} / ${video.entry_count} 个`}>#{video.entry_index + 1}</span>}
         {video.rating > 0 && <span className="card-badge rating"><Icon name="star" size={12} />{video.rating}</span>}
+        {/* 看到哪了：光有一条进度线不够，扫一眼得知道还剩多少 */}
+        {progress > 0 && progress < 96 && (
+          <span className="card-badge resume" title={`看到 ${formatDuration(video.progress_sec)} / ${formatDuration(video.duration_sec)}`}>
+            <Icon name="clock" size={12} />{formatDuration(video.progress_sec)}
+          </span>
+        )}
         {progress > 0 && progress < 96 && (
           <div className="card-progress"><span style={{ width: `${progress}%` }} /></div>
         )}

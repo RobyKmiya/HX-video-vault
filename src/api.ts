@@ -129,8 +129,16 @@ export const api = {
   moveTargets: () => invoke<MoveTarget[]>("move_targets"),
   /** 资源管理器里定位并选中该文件 */
   revealVideo: (id: number) => invoke<void>("reveal_video", { id }),
-  /** 沉浸播放：去掉系统标题栏 + 全屏（画匣沉浸阅读同款） */
+  /** 沉浸播放：只去掉系统标题栏（**不**强制全屏），最大化状态下会自动取消/恢复最大化 */
   setImmersive: (on: boolean) => invoke<void>("set_immersive", { on }),
+  /** 真全屏（系统级窗口全屏，铺满屏幕）；与「无边框沉浸」是两回事 */
+  setFullscreen: (on: boolean) => invoke<void>("set_fullscreen", { on }),
+  /** 老板键第一步：把主窗整个藏起来；恢复靠系统级全局热键 */
+  hideMainWindow: () => invoke<void>("hide_main_window"),
+  /** 老板键呼回键（真值在 Rust 侧：注册过的才算数） */
+  getBossRecall: () => invoke<string>("get_boss_recall"),
+  /** 改呼回键：Rust 注册成功才落盘，失败会返回错误 */
+  setBossRecall: (binding: string) => invoke<void>("set_boss_recall", { binding }),
   /** 把所选视频打包成 zip（保留原文件），返回压缩包路径 */
   compressVideos: (ids: number[], name?: string) =>
     invoke<string>("compress_videos", { ids, name: name ?? null }),

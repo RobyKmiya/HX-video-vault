@@ -18,6 +18,8 @@ const VIEWS: { key: ViewKey; label: string; icon: Parameters<typeof Icon>[0]["na
 ];
 
 interface Props {
+  /** 侧栏宽度（px），由外层的可拖分界线控制 */
+  width?: number;
   view: ViewKey;
   onView: (v: ViewKey) => void;
   tags: Tag[];
@@ -41,6 +43,7 @@ interface Props {
 }
 
 export function Sidebar(props: Props) {
+  const { width = 236 } = props;
   const [tagGroupsOpen, setTagGroupsOpen] = useState<Record<string, boolean>>({});
   const dragCollRef = useRef<number | null>(null);
   const groups = new Map<string, Tag[]>();
@@ -69,7 +72,7 @@ export function Sidebar(props: Props) {
   });
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" style={{ width, flexBasis: width }}>
       <div className="brand">
         <span className="brand-mark"><Icon name="vault" size={22} /></span>
         <span className="brand-name">影匣</span>

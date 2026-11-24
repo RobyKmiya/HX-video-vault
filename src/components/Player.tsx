@@ -6,6 +6,9 @@ import { api } from "../api";
 import { bustCover } from "../cover";
 import { formatDuration } from "../format";
 import { DetailDrawer } from "./DetailDrawer";
+import { ContextMenu } from "./ContextMenu";
+import type { MenuEntry } from "./ContextMenu";
+import { DEFAULT_GESTURES, type GestureAction, type GestureMap } from "../gestures";
 import type { Collection, PlaybackInfo, Tag, VideoItem } from "../types";
 
 interface Props {
@@ -17,9 +20,11 @@ interface Props {
   onPrev: () => void;
   onChanged: () => void;
   onError: (msg: string) => void;
-  /** 无边框沉浸模式（窗口去系统框 + 全屏），由设置或快捷键开启 */
+  /** 无边框沉浸模式（去掉系统标题栏，窗口大小不变），由设置/快捷键/双击画面开启 */
   immersive?: boolean;
   onToggleImmersive?: (on: boolean) => void;
+  /** 鼠标手势槽位绑定（双击画面 / Ctrl+滚轮） */
+  gestures?: GestureMap;
 }
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3];
@@ -89,7 +94,7 @@ function loadPrefs(): PlayerPrefs {
   }
 }
 
-export function Player({ info, tags, collections, onClose, onNext, onPrev, onChanged, onError, immersive = false, onToggleImmersive }: Props) {
+export function Player({ info, tags, collections, onClose, onNext, onPrev, onChanged, onError, immersive = false, onToggleImmersive, gestures = DEFAULT_GESTURES }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -104,6 +109,8 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
   const [volume, setVolume] = useState(0.8);
   const [controls, setControls] = useState(true);
   const [menu, setMenu] = useState<"aspect" | "settings" | null>(null);
+  /** 播放器里的右键菜单 */
+  const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
   const [detailOpen, setDetailOpen] = useState(prefs.detailOpen);
   const [detailVideo, setDetailVideo] = useState<VideoItem>(info.video);
@@ -248,6 +255,13 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
   }, [isMpv]);
 
+  const seekTo = useCallback((sec: number) => {
+    if (isMpv) { void api.mpvCommand("seek", sec); return; }
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Math.max(0, Math.min(v.duration || 0, sec));
+  }, [isMpv]);
+
   const changeSpeed = useCallback((next: number) => {
     setSpeed(next);
     if (isMpv) { void api.mpvCommand("speed", next); return; }
@@ -278,6 +292,15 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     hudTimer.current = window.setTimeout(() => setHud(null), 900);
   }, []);
 
+  const copyPath = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(info.media_path);
+      showHud("路径已复制");
+    } catch {
+      showHud("复制失败");
+    }
+  }, [info.media_path, showHud]);
+
   // 滚轮 / 侧键统一入口：音量、进度都在这里算
   const applyVolume = useCallback((delta: number) => {
     const next = Math.max(0, Math.min(1, Math.round((volRef.current + delta) * 100) / 100));
@@ -289,6 +312,30 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
     showHud(next === 0 ? "静音" : `音量 ${Math.round(next * 100)}%`);
   }, [isMpv, showHud]);
 
+  // 右键菜单：把播放器里能做的事收一处（画匣阅读器菜单同款）
+  const ctxEntries = useMemo<MenuEntry[]>(() => [
+    { label: playing ? "暂停" : "播放", icon: <Icon name={playing ? "pause" : "play"} size={14} />, hint: "空格", onClick: togglePlay },
+    { label: "上一条", icon: <Icon name="back" size={14} />, hint: "P", onClick: () => { save(true); onPrev(); } },
+    { label: "下一条", icon: <Icon name="forward" size={14} />, hint: "N", onClick: () => { save(true); onNext(); } },
+    { label: "后退 10 秒", icon: <Icon name="back" size={14} />, hint: "J", dividerBefore: true, onClick: () => seekBy(-10) },
+    { label: "前进 10 秒", icon: <Icon name="forward" size={14} />, hint: "L", onClick: () => seekBy(10) },
+    { label: "跳到开头", onClick: () => seekTo(0) },
+    { label: "跳到结尾", onClick: () => seekTo(duration) },
+    { label: "0.5×", groupTitle: "倍速", dividerBefore: true, checked: speed === 0.5, onClick: () => changeSpeed(0.5) },
+    { label: "1×", checked: speed === 1, onClick: () => changeSpeed(1) },
+    { label: "1.5×", checked: speed === 1.5, onClick: () => changeSpeed(1.5) },
+    { label: "2×", checked: speed === 2, onClick: () => changeSpeed(2) },
+    { label: "3×", checked: speed === 3, onClick: () => changeSpeed(3) },
+    { label: "全部显示", groupTitle: "画面比例", dividerBefore: true, checked: prefs.aspect === "contain", onClick: () => updatePrefs({ aspect: "contain" }) },
+    { label: "铺满窗口", checked: prefs.aspect === "cover", onClick: () => updatePrefs({ aspect: "cover" }) },
+    { label: "原始尺寸", checked: prefs.aspect === "origin", onClick: () => updatePrefs({ aspect: "origin" }) },
+    { label: muted ? "取消静音" : "静音", icon: <Icon name="volume" size={14} />, hint: "M", dividerBefore: true, onClick: () => setMute(!muted) },
+    { label: "复制文件路径", icon: <Icon name="link" size={14} />, onClick: () => void copyPath() },
+    { label: "在资源管理器中定位", icon: <Icon name="folder" size={14} />, onClick: () => { void api.revealVideo(info.video.id).catch((e) => onError(String(e))); } },
+    { label: "查看详情", icon: <Icon name="info" size={14} />, hint: "I", dividerBefore: true, onClick: () => setDetailOpen(true) },
+    { label: "退出播放", icon: <Icon name="x" size={14} />, hint: "Esc", dividerBefore: true, danger: true, onClick: () => { save(true); onClose(); } },
+  ], [playing, togglePlay, onPrev, onNext, save, seekBy, seekTo, duration, speed, changeSpeed, prefs.aspect, updatePrefs, muted, setMute, copyPath, info.video.id, onError, setDetailOpen, onClose]);
+
   // 详情面板里的编辑要即时回显：改完重新取一条，避免用旧的 tags/collections
   const refreshDetail = useCallback(async () => {
     try {
@@ -299,12 +346,33 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
   }, [info.video.id, onChanged]);
 
   // 鼠标：垂直滚轮音量、横向滚轮/Shift+滚轮 进度、侧键按设置切条或快进快退
+  // 手势槽位 → 具体动作（画匣同款：手势复用已有的动作实现，不另造一套）
+  const runGesture = useCallback((action: GestureAction) => {
+    switch (action) {
+      case "toggleImmersive": onToggleImmersive?.(!immersive); break;
+      case "toggleFullscreen": void wrapRef.current?.requestFullscreen?.(); break;
+      case "togglePlay": togglePlay(); break;
+      case "volumeUp": applyVolume(0.1); break;
+      case "volumeDown": applyVolume(-0.1); break;
+      case "seekForward": seekBy(10); break;
+      case "seekBackward": seekBy(-10); break;
+      case "none": break;
+    }
+  }, [immersive, onToggleImmersive, togglePlay, applyVolume, seekBy]);
+
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) return; // 保留缩放
+      // Ctrl+滚轮走手势表（画匣同款槽位）；普通滚轮按老规矩：横滚=跳转、竖滚=音量
+      if (e.ctrlKey) {
+        const action = e.deltaY < 0 ? gestures.ctrlWheelUp : gestures.ctrlWheelDown;
+        if (action === "none") return;
+        e.preventDefault();
+        runGesture(action);
+        return;
+      }
       const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY) * 0.6;
       if (horiz) {
         e.preventDefault();
@@ -361,9 +429,9 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
       el.removeEventListener("mouseup", swallow);
       el.removeEventListener("auxclick", swallow);
     };
-  }, [applyVolume, onNext, onPrev, prefs.sideKey, prefs.wheelVolume, seekBy, showHud]);
+  }, [applyVolume, onNext, onPrev, prefs.sideKey, prefs.wheelVolume, seekBy, showHud, gestures, runGesture]);
 
-  // 快捷键：←→ 5 秒，J/L 10 秒，↑↓ 音量，空格/K 暂停，N/P 上下一条，M 静音，F 全屏
+  // 快捷键：←→ 5 秒，J/L 10 秒，↑↓ 音量，空格/K 暂停，N/P 上下一条，M 静音，F 沉浸（无边框）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -387,7 +455,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
       if (key === "j") { e.preventDefault(); seekBy(-10); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); setMute(false); const v = Math.min(1, volume + 0.1); setVolume(v); if (isMpv) void api.mpvCommand("volume", v * 100); else if (videoRef.current) videoRef.current.volume = v; return; }
       if (e.key === "ArrowDown") { e.preventDefault(); const v = Math.max(0, volume - 0.1); setVolume(v); setMuted(v === 0); if (isMpv) void api.mpvCommand("volume", v * 100); else if (videoRef.current) { videoRef.current.volume = v; videoRef.current.muted = v === 0; } return; }
-      if (key === "f") { void wrapRef.current?.requestFullscreen?.(); return; }
+      if (key === "f") { e.preventDefault(); onToggleImmersive?.(!immersive); return; }
       if (key === "i") { setDetailOpen((v) => !v); return; }
       if (key === "m") { setMute(!muted); return; }
       if (key === "c") { setControls((c) => !c); }
@@ -479,7 +547,31 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
   const controlsVisible = !external && (isMpv || controls);
 
   return (
-    <div className="player-overlay" ref={wrapRef} onMouseMove={poke}>
+    <div
+      className={`player-overlay ${immersive ? "is-immersive" : ""}`}
+      ref={wrapRef}
+      onMouseMove={poke}
+      onContextMenu={(e) => {
+        // 详情面板内部的右键不弹播放器菜单（那儿有自己的语境）
+        if ((e.target as HTMLElement).closest(".player-detail")) return;
+        e.preventDefault();
+        setCtx({ x: e.clientX, y: e.clientY });
+      }}
+    >
+      {immersive && (
+        <>
+          {/* 无边框之后没有系统标题栏了，顶部留一条拖动热区：拖动挪窗口，双击=最大化/还原（Tauri 内置）。 */}
+          <div className="player-drag-strip" data-tauri-drag-region="" title="拖动窗口" />
+          {/* 角落还原点：几乎看不见的小圆点，鼠标碰到才明显 —— 沉浸时唯一的退出入口之一。 */}
+          <button
+            type="button"
+            className="player-corner-toggle"
+            onClick={(e) => { e.stopPropagation(); onToggleImmersive?.(false); }}
+            title="退出沉浸模式 (Esc)"
+            aria-label="退出沉浸模式"
+          ><span /></button>
+        </>
+      )}
       <div className="player-main" ref={stageRef}>
       <div className="player-stage" onClick={() => { setMenu(null); poke(); }}>
         {isMpv ? (
@@ -517,7 +609,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
               onEnded={onEnded}
               onError={(e) => onError(`播放失败：${e.currentTarget.error?.message || "未知错误"}`)}
               onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-              onDoubleClick={(e) => { e.stopPropagation(); void wrapRef.current?.requestFullscreen?.(); }}
+              onDoubleClick={(e) => { e.stopPropagation(); runGesture(gestures.doubleClick); }}
             />
           </div>
         )}
@@ -668,7 +760,7 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
               )}
             </div>
 
-            <button className="player-round" onClick={() => void wrapRef.current?.requestFullscreen?.()} title="全屏 (F)">
+            <button className="player-round" onClick={() => void wrapRef.current?.requestFullscreen?.()} title="全屏（浏览器级，Esc 退出）">
               <Icon name="fullscreen" size={18} />
             </button>
           </div>
@@ -690,6 +782,16 @@ export function Player({ info, tags, collections, onClose, onNext, onPrev, onCha
             onError={onError}
           />
         </div>
+      )}
+
+      {ctx && (
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          entries={ctxEntries}
+          header={info.video.file_name}
+          onClose={() => setCtx(null)}
+        />
       )}
     </div>
   );

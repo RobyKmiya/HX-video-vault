@@ -24,7 +24,9 @@ export type ActionId =
   | "immersive.toggle"
   | "edit.rename"
   | "edit.move"
-  | "edit.trash";
+  | "edit.trash"
+  | "boss.hide"
+  | "boss.recall";
 
 export interface ActionDef {
   id: ActionId;
@@ -50,6 +52,8 @@ export const ACTIONS: ActionDef[] = [
   { id: "edit.move", label: "移动到…", group: "文件", hint: "选中若干条时可用" },
   { id: "edit.trash", label: "移入回收站", group: "文件" },
   { id: "immersive.toggle", label: "沉浸播放开关", group: "界面" },
+  { id: "boss.hide", label: "老板键：藏窗", group: "界面", hint: "把窗口整个藏起来，像没开这个软件" },
+  { id: "boss.recall", label: "老板键：全局呼回", group: "界面", hint: "系统级热键（窗口藏起后只有它能唤回）" },
 ];
 
 export type KeyMap = Partial<Record<ActionId, string>>;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { Dispatch, DragEvent, MouseEvent as ReactMouseEvent, SetStateAction } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -14,9 +14,16 @@ import { DownloadPanel } from "./components/DownloadPanel";
 import { EditPanel } from "./components/EditPanel";
 import { MoveDialog } from "./components/MoveDialog";
 import { RenameDialog } from "./components/RenameDialog";
+import { Splitter } from "./components/Splitter";
+import { Toast, type ToastData, type ToastKind } from "./components/Toast";
 import { api } from "./api";
 import { prewarmCovers, resetCovers } from "./cover";
 import { formatBytes } from "./format";
+import { usePersistentSize } from "./layout";
+import {
+  GESTURE_ACTION_LABELS, GESTURE_LABELS, loadGestures, saveGestures,
+  type GestureAction, type GestureMap, type GestureSlot,
+} from "./gestures";
 import {
   ACTIONS, loadKeyMap, saveKeyMap, comboFromEvent, actionForCombo, bindAction, unbindAction,
   type ActionId, type KeyMap,
@@ -113,8 +120,13 @@ export default function App() {
   const [menuBusy, setMenuBusy] = useState(false);
   // 快捷键表：默认全空，只在设置页录制后才有绑定
   const [keymap, setKeymap] = useState<KeyMap>(() => loadKeyMap());
+  // 鼠标手势槽位（双击画面 / Ctrl+滚轮）：和快捷键一样存本机，改完立即生效
+  const [gestures, setGestures] = useState<GestureMap>(() => loadGestures());
   const [immersive, setImmersive] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  // 用户对「要不要无边框」的偏好：设置里的默认值打底。
+  // 退播放只恢复窗口边框、**不清偏好**，所以下次进来还是按用户上次的选择走。
+  const [immersivePref, setImmersivePref] = useState(false);
+  const [toast, setToast] = useState<ToastData | null>(null);
   const [loading, setLoading] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheet, setSheet] = useState<SheetStatus>({ running: false, total: 0, done: 0, pending: 0 });
@@ -141,6 +153,8 @@ export default function App() {
   keymapRef.current = keymap;
   const immersiveDefaultRef = useRef(false);
   immersiveDefaultRef.current = !!settings.immersive_default;
+  const immersivePrefRef = useRef(false);
+  immersivePrefRef.current = immersivePref;
   const actionRef = useRef<(id: ActionId) => void>(() => {});
   const reloadRef = useRef<() => void>(() => {});
   const lastScanRefresh = useRef(0);
@@ -148,9 +162,8 @@ export default function App() {
   const importFinishedRef = useRef(true);
   const doScanRef = useRef<() => void>(() => {});
 
-  const notify = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
+  const notify = useCallback((msg: string, kind: ToastKind = "info") => {
+    setToast({ id: Date.now(), message: msg, kind });
   }, []);
 
   const refreshMeta = useCallback(async () => {
@@ -464,12 +477,14 @@ export default function App() {
   // 可录制的快捷键：默认没有绑定，录入后这里的处理器在设置页之外生效
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
       const combo = comboFromEvent(e);
       if (!combo) return;
       const action = actionForCombo(keymapRef.current, combo);
       if (!action) return;
+      // 老板键在任何焦点下都要能按（哪怕焦点正落在搜索框里）
+      if (action === "boss.hide") { e.preventDefault(); actionRef.current(action); return; }
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
       e.preventDefault();
       actionRef.current(action);
     };
@@ -482,6 +497,22 @@ export default function App() {
     [videoPage.items, detailId],
   );
 
+  // 无边框沉浸：进播放时按「用户上次的选择」或设置默认值决定；
+  // 退播放时只恢复窗口边框，不动偏好（见 restoreWindowChrome）。
+  const setImmersiveMode = useCallback(async (on: boolean) => {
+    setImmersivePref(on);
+    setImmersive(on);
+    try {
+      await api.setImmersive(on);
+    } catch (e) { notify(String(e)); }
+  }, [notify]);
+
+  // 退播放：把系统标题栏还回去，但不动用户的偏好
+  const restoreWindowChrome = useCallback(async () => {
+    setImmersive(false);
+    try { await api.setImmersive(false); } catch { /* 恢复失败也别把退出流程卡住 */ }
+  }, []);
+
   // 打开播放统一走这里：先试 mpv（支持字幕/倍速/IPC），拿不到就退回内置。
   // 首次打开与「上一条/下一条」共用同一条路径，避免翻页时上一集的 mpv 窗口留在屏幕上。
   const openById = useCallback(async (id: number) => {
@@ -490,15 +521,13 @@ export default function App() {
       if (!took) void api.mpvClose().catch(() => {});
       const result = await api.playback(id);
       setPlayer({ ...result, source: took ? "mpv" : result.source });
-      if (immersiveDefaultRef.current) {
-        void api.setImmersive(true).then(() => setImmersive(true)).catch((e) => notify(String(e)));
-      }
+      void setImmersiveMode(immersivePrefRef.current || immersiveDefaultRef.current);
       // 正在播的那条就是「当前选中的那条」，关掉播放器后网格要知道该高亮谁
       setSelected(new Set([id]));
       setDetailId((cur) => (cur === null ? null : id));
       await refreshMeta();
     } catch (e) { notify(String(e)); }
-  }, [notify, refreshMeta]);
+  }, [notify, refreshMeta, setImmersiveMode]);
 
   // 退出播放后：只更新这一条（进度/已看/元数据），并把卡片拉回视野，
   // 不整体重载第一页 —— 否则在第 N 页看的视频会被重置回第一页，选中的也就丢了
@@ -617,13 +646,6 @@ export default function App() {
     if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) setDetailId(video.id);
   };
 
-  const setImmersiveMode = useCallback(async (on: boolean) => {
-    try {
-      await api.setImmersive(on);
-      setImmersive(on);
-    } catch (e) { notify(String(e)); }
-  }, [notify]);
-
   // 库内回收站：只改库标记，磁盘文件不动；二次确认后才执行
   const trashIds = async (ids: number[]) => {
     if (!ids.length) return;
@@ -692,6 +714,14 @@ export default function App() {
         break;
       case "immersive.toggle":
         void setImmersiveMode(!immersive);
+        break;
+      case "boss.hide":
+        // 老板键：把窗口整个藏起来。恢复靠系统级全局热键（Rust 注册）。
+        void api.hideMainWindow().catch((e) => notify(String(e)));
+        break;
+      case "boss.recall":
+        // 呼回键是系统级热键，窗口藏起来之后前端收不到按键，这里按了也没用
+        notify("呼回键是系统级热键，请在设置里改绑定");
         break;
     }
     setMenu(null);
@@ -834,17 +864,23 @@ export default function App() {
           </div>
           <button className="link-btn" onClick={() => setSettingsOpen(true)}>高级设置</button>
         </div>
-        {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} onClose={() => setSettingsOpen(false)} notify={notify} />}
+        {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} gestures={gestures} setGestures={setGestures} onClose={() => setSettingsOpen(false)} notify={notify} />}
       </div>
     );
   }
 
   const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
 
+  // 侧栏宽度：拖得动、记得住（画匣同款，min/max 与 CSS 断点保持一致）
+  const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistentSize(
+    "vv.layout.sidebar", 236, 190, 460,
+  );
+
 
   return (
     <div className="app-shell">
       <Sidebar
+        width={sidebarWidth}
         view={view}
         onView={(v) => {
           pushLoc();
@@ -877,6 +913,15 @@ export default function App() {
         tagsOpen={tagsOpen}
         downloadOpen={downloadOpen}
         editOpen={editOpen}
+      />
+
+      <Splitter
+        value={sidebarWidth}
+        min={190}
+        max={460}
+        onChange={setSidebarWidth}
+        onReset={resetSidebarWidth}
+        label="调整侧栏宽度"
       />
 
       <main className="main" ref={mainRef}>
@@ -1269,11 +1314,13 @@ export default function App() {
           info={player}
           immersive={immersive}
           onToggleImmersive={(on) => void setImmersiveMode(on)}
+          gestures={gestures}
           onClose={() => {
             const id = player?.video.id;
             if (player?.source === "mpv") void api.mpvClose();
             setPlayer(null);
-            if (immersive) void setImmersiveMode(false);
+            // 恢复窗口边框，但保留用户的沉浸偏好（下次进来还按偏好走）
+            void restoreWindowChrome();
             void refreshMeta();
             if (id) void syncAfterPlay(id); else void loadVideos(true);
           }}
@@ -1287,7 +1334,7 @@ export default function App() {
       )}
 
       {settingsOpen && (
-        <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} onClose={() => setSettingsOpen(false)} notify={notify} />
+        <SettingsModal settings={settings} setSettings={setSettings} keymap={keymap} setKeymap={setKeymap} gestures={gestures} setGestures={setGestures} onClose={() => setSettingsOpen(false)} notify={notify} />
       )}
 
       {sheetOpen && (
@@ -1332,7 +1379,7 @@ export default function App() {
         />
       )}
 
-      {toast && <div className="toast"><Icon name="info" size={15} />{toast}</div>}
+      {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
 
       {booting && <BootSplash stage={bootStage} fading={bootFade} />}
     </div>
@@ -1418,32 +1465,67 @@ function ImportHud({
 }
 
 function SettingsModal({
-  settings, setSettings, keymap, setKeymap, onClose, notify,
+  settings, setSettings, keymap, setKeymap, gestures, setGestures, onClose, notify,
 }: {
   settings: Settings;
   setSettings: (s: Settings) => void;
   keymap: KeyMap;
-  setKeymap: (m: KeyMap) => void;
+  setKeymap: Dispatch<SetStateAction<KeyMap>>;
+  gestures: GestureMap;
+  setGestures: Dispatch<SetStateAction<GestureMap>>;
   onClose: () => void;
   notify: (m: string) => void;
 }) {
   const [draft, setDraft] = useState<Settings>(settings);
   const [recording, setRecording] = useState<ActionId | null>(null);
+  /** 录制时的提示（冲突、注册失败…） */
+  const [keyHint, setKeyHint] = useState("");
   const [appVersion, setAppVersion] = useState("");
   useEffect(() => {
     // 界面内可自查版本号：更新是否生效一目了然
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
   useEffect(() => {
+    // 呼回键的真值在 Rust（注册过的才算数）：打开面板时以 Rust 为准校正一遍，
+    // 免得另一处改过之后 localStorage 与实际注册的键对不上。
+    void api.getBossRecall()
+      .then((binding) => {
+        if (!binding) return;
+        setKeymap((prev) => {
+          if (prev["boss.recall"] === binding) return prev;
+          const next = { ...prev, "boss.recall": binding };
+          saveKeyMap(next);
+          return next;
+        });
+      })
+      .catch(() => {});
+  }, [setKeymap]);
+  useEffect(() => {
     if (!recording) return;
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (e.key === "Escape") { setRecording(null); return; }
+      if (e.key === "Escape") { setRecording(null); setKeyHint(""); return; }
       const combo = comboFromEvent(e);
       if (!combo) return;
+      // 冲突提示：同一个组合只能绑一个动作，不覆盖别人的（宁可让人换一个）
+      const conflict = (Object.keys(keymap) as ActionId[])
+        .find((id) => id !== recording && keymap[id] === combo);
+      if (conflict) {
+        const label = ACTIONS.find((a) => a.id === conflict)?.label ?? conflict;
+        setKeyHint(`「${combo}」已经绑给「${label}」了，换一个`);
+        return;
+      }
+      const previous = keymap;
       const next = bindAction(keymap, recording, combo);
-      saveKeyMap(next); setKeymap(next); setRecording(null);
+      saveKeyMap(next); setKeymap(next); setRecording(null); setKeyHint("");
+      // 呼回键是系统级热键，必须推给 Rust 注册；注册失败就回滚并说明原因
+      if (recording === "boss.recall") {
+        void api.setBossRecall(combo).catch((error) => {
+          setKeyHint(`呼回键「${combo}」注册失败：${String(error)}`);
+          saveKeyMap(previous); setKeymap(previous);
+        });
+      }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -1526,7 +1608,7 @@ function SettingsModal({
           </div>
           <div className="field keymap-field">
             <label>快捷键（默认全部未绑定，点右侧录制）</label>
-            <p className="hint">输入框里打字不会触发快捷键；Esc 取消录制。同一个组合只保留最后一个绑定。</p>
+            <p className="hint">输入框里打字不会触发快捷键；Esc 取消录制。同一个组合只保留最后一个绑定。老板键两个动作是「应用内按键 + 系统级热键」，呼回那个会真的注册到系统。</p>
             <div className="keymap-list">
               {(["排序", "播放", "选择与收藏", "文件", "界面"] as const).map((group) => (
                 <div className="keymap-group" key={group}>
@@ -1539,10 +1621,36 @@ function SettingsModal({
                       </button>
                       {keymap[a.id] && <button className="keymap-clear" title="清除绑定" onClick={() => {
                         const next = unbindAction(keymap, a.id);
-                        saveKeyMap(next); setKeymap(next);
+                        saveKeyMap(next); setKeymap(next); setKeyHint("");
+                        // 呼回键清掉之后，Rust 侧恢复默认热键（不然就再也唤不回来了）
+                        if (a.id === "boss.recall") void api.setBossRecall("Ctrl+Shift+H").catch(() => {});
                       }}><Icon name="x" size={12} /></button>}
                     </div>
                   ))}
+                </div>
+              ))}
+            </div>
+            {keyHint && <p className="hint keymap-hint-warn">{keyHint}</p>}
+          </div>
+          <div className="field keymap-field">
+            <label>鼠标手势（播放器内）</label>
+            <p className="hint">单击画面仍是立即播放/暂停（加了延迟会发木），所以这里只管双击和 Ctrl+滚轮。</p>
+            <div className="keymap-list">
+              {(Object.keys(GESTURE_LABELS) as GestureSlot[]).map((slot) => (
+                <div className="keymap-row" key={slot}>
+                  <span>{GESTURE_LABELS[slot]}</span>
+                  <select
+                    className="keymap-select"
+                    value={gestures[slot]}
+                    onChange={(e) => {
+                      const next = { ...gestures, [slot]: e.target.value as GestureAction };
+                      saveGestures(next); setGestures(next);
+                    }}
+                  >
+                    {(Object.keys(GESTURE_ACTION_LABELS) as GestureAction[]).map((action) => (
+                      <option key={action} value={action}>{GESTURE_ACTION_LABELS[action]}</option>
+                    ))}
+                  </select>
                 </div>
               ))}
             </div>
