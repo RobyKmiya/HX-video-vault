@@ -268,6 +268,8 @@ export interface FolderInfo {
   /** 末段名，卡片标题用 */
   leaf: string;
   count: number;
+  /** 夹内最新入库时间（秒），用于按最新入库排文件夹 */
+  latest_added: number;
   /** 封面拼贴素材（≤4 张已有图片路径） */
   covers: string[];
 }

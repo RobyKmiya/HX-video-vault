@@ -234,6 +234,8 @@ pub struct FolderInfo {
     pub leaf: String,
     /// 夹内视频条数（压缩包条目各算一条）
     pub count: i64,
+    /// 夹内最新入库时间（秒），用于「按最新入库排文件夹」
+    pub latest_added: i64,
     /// 封面拼贴素材（≤4 张已有图片：自选封面 > 中帧缓存 > 接触表，存在哪个算哪个）
     pub covers: Vec<String>,
 }

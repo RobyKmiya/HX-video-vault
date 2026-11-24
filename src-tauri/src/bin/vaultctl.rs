@@ -229,8 +229,12 @@ fn run(cli: &Cli) -> Result<Value, String> {
             let mut seen: Vec<String> = Vec::new();
             for entry in walkdir::WalkDir::new(&target).max_depth(12).into_iter().filter_map(Result::ok) {
                 let p = entry.path();
+                // 与 GUI 扫描同一套规则：跳过链接/快捷方式，路径统一反斜杠
+                if entry.file_type().is_symlink() { continue; }
                 if !p.is_file() || p.to_string_lossy().contains(".vault") { continue; }
-                let key_path = p.to_string_lossy().to_string();
+                if p.extension().and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk")) { continue; }
+                let key_path = media::path_key(p);
                 let recs = if media::is_video(p) {
                     let (size, mtime) = media::file_stamp(p);
                     let fresh = known
@@ -271,8 +275,9 @@ fn run(cli: &Cli) -> Result<Value, String> {
                 }
             }
             let missing = db::mark_missing(&ctx.conn, &seen)?;
+            let folders = db::sync_folder_collections(&ctx.conn, &target, &seen)?;
             Ok(json!({ "ok": true, "action": "scan", "found": found, "added": added, "updated": updated,
-                "probed": probed, "reused": reused, "missing": missing, "errors": errors }))
+                "probed": probed, "reused": reused, "missing": missing, "folders": folders, "errors": errors }))
         }
         Command::Import { paths, entry_limit } => {
             let ctx = open(cli)?;

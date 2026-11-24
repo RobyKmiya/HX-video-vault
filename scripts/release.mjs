@@ -9,6 +9,7 @@
  *   node scripts/release.mjs --dry-run
  *   node scripts/release.mjs --no-install   # 只打包不安装
  *   node scripts/release.mjs --no-test      # 跳过 Rust 单测（只改了前端时用）
+ *   node scripts/release.mjs --reopen       # 装机后自动拉起（默认不拉起，留手动检查）
  *
  * 与画匣 release.mjs 完全隔离：
  *   - 只操作本仓库 E:\VideoVault 与安装目录 %LOCALAPPDATA%\影匣；
@@ -39,6 +40,8 @@ const doInstall = !argv.includes('--no-install');
 const skipTests = argv.includes('--no-test');
 /** 版本号已手工改好时用：只打包安装，不再写 package.json / Cargo.toml / tauri.conf.json */
 const noBump = argv.includes('--no-bump');
+/** 管理员规矩：装机后不自动打开，留手动检查；只有显式 --reopen 才拉起。 */
+const doReopen = argv.includes('--reopen');
 const bumpKind = argv.includes('--minor') ? 'minor' : argv.includes('--major') ? 'major' : 'patch';
 const setIndex = argv.indexOf('--set');
 const explicitVersion = setIndex >= 0 ? argv[setIndex + 1] : null;
@@ -305,7 +308,8 @@ if (doInstall) {
   });
   if (doInstall) {
     step('桌面快捷方式校验/更新（指向最新安装位）', refreshShortcuts);
-    step('重新打开影匣（跑的就是刚装的新版）', reopenApp);
+    if (doReopen) step('重新打开影匣（显式 --reopen）', reopenApp);
+    else console.log('  ! 按管理员规矩，装机后不自动打开；需要实机验收请手动双击桌面图标');
   }
 } else {
   warn('已跳过安装（--no-install）');

@@ -188,6 +188,8 @@ h1, h2, h3, p { margin: 0; }
   gap: 18px 16px;
   align-items: start;
 }
+/* 窗口化渲染的上下占位：撑出未渲染卡片的高度，滚动条位置保持真实 */
+.grid-spacer { grid-column: 1 / -1; height: 0; pointer-events: none; }
 .video-card {
   min-width: 0;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);

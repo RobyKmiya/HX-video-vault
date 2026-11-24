@@ -316,8 +316,18 @@ async fn scan(
             .filter_entry(|e| !e.file_name().to_string_lossy().starts_with(".vault"))
             .filter_map(Result::ok)
         {
+            // 跳过符号链接/联接与 Windows 快捷方式：它们指向的文件会被目标路径本身登记，
+            // 不跳过就会出现「同一部影片好几条」的假重复。
+            if entry.file_type().is_symlink() {
+                continue;
+            }
             let path = entry.path();
             if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+            {
                 continue;
             }
             if media::is_video(path) {
@@ -336,7 +346,7 @@ async fn scan(
         let mut records: Vec<db::VideoRecord> = Vec::new();
         let mut reused = 0usize;
         for path in &archives {
-            let key_path = path.to_string_lossy().to_string();
+            let key_path = media::path_key(path);
             let (size, mtime) = media::file_stamp(path);
             seen.push(key_path.clone());
             if let Some(st) = known.get(&(key_path, 0)) {
@@ -359,7 +369,7 @@ async fn scan(
         let mut to_probe: Vec<PathBuf> = Vec::new();
         for path in &videos {
             report.found += 1;
-            let key_path = path.to_string_lossy().to_string();
+            let key_path = media::path_key(path);
             let (size, mtime) = media::file_stamp(path);
             seen.push(key_path.clone());
             let fresh = known

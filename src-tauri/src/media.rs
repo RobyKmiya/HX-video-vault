@@ -13,6 +13,12 @@ const VIDEO_EXT: &[&str] = &[
 ];
 const ARCHIVE_EXT: &[&str] = &["zip", "cbz"];
 
+/// 入库路径统一用反斜杠：历史上同一文件被 `F:/x` 和 `F:\x` 登记成两条，
+/// 这里在生成记录时就归一化，配合 db v6 迁移把老库洗干净。
+pub fn path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MediaMeta {
     pub duration_sec: f64,
@@ -263,7 +269,7 @@ pub fn record_stub(path: &Path) -> VideoRecord {
         .unwrap_or("")
         .to_ascii_lowercase();
     VideoRecord {
-        path: path.to_string_lossy().to_string(),
+        path: path_key(path),
         file_name,
         container,
         size_bytes,
@@ -301,7 +307,7 @@ pub fn archive_records(path: &Path, entry_limit: usize) -> Result<Vec<VideoRecor
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let archive_path = path.to_string_lossy().to_string();
+    let archive_path = path_key(path);
     let mut names: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         if let Ok(f) = archive.by_index(i) {

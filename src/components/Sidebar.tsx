@@ -4,11 +4,12 @@ import { api } from "../api";
 import type { Collection, Tag } from "../types";
 
 export type ViewKey =
-  | "all" | "gallery" | "recent" | "favorites" | "watchlist" | "unwatched" | "completed" | "trash";
+  | "all" | "gallery" | "latest" | "recent" | "favorites" | "watchlist" | "unwatched" | "completed" | "trash";
 
 const VIEWS: { key: ViewKey; label: string; icon: Parameters<typeof Icon>[0]["name"] }[] = [
   { key: "all", label: "全部视频", icon: "grid" },
   { key: "gallery", label: "合集画廊", icon: "sparkle" },
+  { key: "latest", label: "最近入库", icon: "down" },
   { key: "recent", label: "最近观看", icon: "clock" },
   { key: "favorites", label: "收藏", icon: "heart" },
   { key: "watchlist", label: "待看清单", icon: "list" },

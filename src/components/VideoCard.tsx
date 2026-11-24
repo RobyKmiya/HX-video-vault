@@ -1,5 +1,5 @@
 import type { DragEvent, MouseEvent } from "react";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons";
 import { useCoverSrc } from "../cover";
 import { formatBytes, formatDuration, relativeTime } from "../format";
@@ -32,8 +32,24 @@ export function VideoCard({
   const progress = video.duration_sec > 0
     ? Math.min(100, (video.progress_sec / video.duration_sec) * 100)
     : 0;
+  // 卡片进视口附近（上下 600px）才请求中帧封面；大文件夹首屏不再几十个 ffmpeg 排队
+  const cardRef = useRef<HTMLElement | null>(null);
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") { setNear(true); return; }
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setNear(true);
+        io.disconnect();
+      }
+    }, { rootMargin: "600px 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
   // 自选封面 > 接触表 > 中间帧兜底（后端懒生成），失败回占位图
-  const cover = useCoverSrc(video);
+  const cover = useCoverSrc(video, near);
   const isArchive = video.entry_index > 0;
 
   // 单击开详情、双击直接播放：单击先挂一个 220ms 的定时器，双击时撤掉，避免详情先跳出来闪一下
@@ -56,6 +72,7 @@ export function VideoCard({
 
   return (
     <article
+      ref={cardRef}
       className={`video-card ${selected ? "selected" : ""}`}
       data-video-id={video.id}
       onClick={(e) => onSelect(video, e)}

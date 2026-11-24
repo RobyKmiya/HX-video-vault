@@ -51,8 +51,36 @@ export function coverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_sheet"
   return "";
 }
 
-/** 封面 URL hook：自选封面 > 中间帧（后端懒生成），兜底失败返回空串（调用方画占位）。 */
-export function useCoverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_sheet">): string {
+/**
+ * 后台低优先级预热最近 N 条的中帧缓存：复用同一套限流与 Promise 去重，
+ * 每条之间留间隔，避免刚打开应用就和扫描/抽帧抢 IO。
+ */
+export async function prewarmCovers(ids: number[]): Promise<void> {
+  for (const id of ids) {
+    if (cache.has(id)) continue;
+    await new Promise<void>((r) => window.setTimeout(r, 180));
+    const p = (async () => {
+      await acquire();
+      try {
+        return await api.videoCover(id);
+      } finally {
+        release();
+      }
+    })();
+    cache.set(id, p);
+    await p.catch(() => { cache.delete(id); });
+  }
+}
+
+/**
+ * 封面 URL hook：自选封面 > 中间帧（后端懒生成），兜底失败返回空串（调用方画占位）。
+ * enabled=false 时（卡片还没进视口）不发请求，滚动到附近再懒生成，避免大文件夹
+ * 首屏几十张卡同时排队抽帧。
+ */
+export function useCoverSrc(
+  video: Pick<VideoItem, "id" | "cover" | "contact_sheet">,
+  enabled = true,
+): string {
   const own = coverSrc(video);
   const [fallback, setFallback] = useState("");
   useEffect(() => {
@@ -60,6 +88,7 @@ export function useCoverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_she
       setFallback("");
       return;
     }
+    if (!enabled) return;
     let dead = false;
     let p = cache.get(video.id);
     if (!p) {
@@ -82,6 +111,6 @@ export function useCoverSrc(video: Pick<VideoItem, "id" | "cover" | "contact_she
     return () => {
       dead = true;
     };
-  }, [own, video.id, video.cover]);
+  }, [own, enabled, video.id, video.cover]);
   return own || fallback;
 }

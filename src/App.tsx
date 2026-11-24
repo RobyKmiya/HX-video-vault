@@ -15,7 +15,7 @@ import { EditPanel } from "./components/EditPanel";
 import { MoveDialog } from "./components/MoveDialog";
 import { RenameDialog } from "./components/RenameDialog";
 import { api } from "./api";
-import { resetCovers } from "./cover";
+import { prewarmCovers, resetCovers } from "./cover";
 import { formatBytes } from "./format";
 import {
   ACTIONS, loadKeyMap, saveKeyMap, comboFromEvent, actionForCombo, bindAction, unbindAction,
@@ -123,7 +123,7 @@ export default function App() {
   // 主页层级浏览：当前所在文件夹路径（auto 收藏夹的层级 = 磁盘目录树）
   const [folderPath, setFolderPath] = useState<string[]>([]);
   const [folders, setFolders] = useState<FolderInfo[]>([]);
-  const [folderSort, setFolderSort] = useState<"name" | "count">("name");
+  const [folderSort, setFolderSort] = useState<"name" | "count" | "added">("name");
   // 手动刷新文件夹封面后自增：夹卡的 2×2 拼贴与卡片封面都靠它换版本号，绕开 WebView 图片缓存
   const [folderTick, setFolderTick] = useState(0);
   const [coverBusy, setCoverBusy] = useState(false);
@@ -237,8 +237,8 @@ export default function App() {
     pushLoc();
     setFolderPath(path);
     setSelected(new Set());
-    // 文件夹浏览模式下层层进入都要保持 folder，否则夹网格会在下一层消失
-    setSort((cur) => (cur === "folder" ? "folder" : path.length ? "manual" : "added"));
+    // 进夹不再强制切 manual：保留用户当前排序，否则「最近加入」一进文件夹就变回入库位次，
+    // 看起来像最新视频消失了。folder 排序也照旧层层保持，夹网格不会断。
     setSortRev(false);
     if (path.length) {
       setActiveCollection(path.join(" › "));
@@ -748,6 +748,70 @@ export default function App() {
     } catch (e) { notify(String(e)); }
   };
 
+  // ── 大列表窗口化：只渲染视口附近的卡片，DOM 规模不再随滚动无限增长 ──
+  // 注意：这些 hook 必须放在 !ready / !info 早退之前（0.1.19 黑屏坑）。
+  const mainRef = useRef<HTMLElement | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const [gridWin, setGridWin] = useState({ start: 0, end: 96 });
+  const [gridMetrics, setGridMetrics] = useState({ cols: 4, rowH: 250 });
+  const calcGridMetrics = useCallback(() => {
+    const main = mainRef.current;
+    if (!main) return null;
+    const chrome = window.innerWidth <= 900 ? 36 : 56;
+    const avail = Math.max(208, main.clientWidth - chrome);
+    const cols = Math.max(1, Math.floor((avail + 16) / (208 + 16)));
+    const cardW = Math.max(208, (avail - (cols - 1) * 16) / cols);
+    const rowH = Math.round(cardW * 9 / 16 + (settings.show_card_info === false ? 0 : 78) + 18);
+    return { cols, rowH };
+  }, [settings.show_card_info]);
+  const updateGridWindow = useCallback(() => {
+    const main = mainRef.current;
+    const grid = gridRef.current;
+    const m = calcGridMetrics();
+    if (!main || !grid || !m) return;
+    const total = videoPage.items.length;
+    const rowCount = Math.ceil(total / m.cols);
+    const offset = main.scrollTop - grid.offsetTop;
+    const firstRow = Math.max(0, Math.floor(offset / m.rowH) - 5);
+    const lastRow = Math.min(rowCount, Math.ceil((offset + main.clientHeight) / m.rowH) + 5);
+    const next = {
+      start: firstRow * m.cols,
+      end: Math.min(total, Math.max(firstRow * m.cols + m.cols, lastRow * m.cols)),
+    };
+    setGridMetrics(m);
+    setGridWin((prev) => (prev.start === next.start && prev.end === next.end ? prev : next));
+  }, [calcGridMetrics, videoPage.items.length]);
+  useEffect(() => {
+    updateGridWindow();
+    const main = mainRef.current;
+    if (!main) return;
+    const onScroll = () => updateGridWindow();
+    main.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver(() => updateGridWindow());
+    ro.observe(main);
+    return () => { main.removeEventListener("scroll", onScroll); ro.disconnect(); };
+  }, [updateGridWindow, view, folderPath, sort]);
+
+  // 「最近入库」首屏后台预热：错开 180ms 串行抽帧，不让新片卡在占位图上
+  useEffect(() => {
+    if (!ready || !info || view !== "latest") return;
+    const ids = videoPage.items.slice(0, 24).filter((v) => !v.cover).map((v) => v.id);
+    if (!ids.length) return;
+    const t = window.setTimeout(() => { void prewarmCovers(ids); }, 1200);
+    return () => window.clearTimeout(t);
+  }, [ready, info, view, videoPage.items]);
+
+  const virtualized = videoPage.items.length > 96;
+  const visibleItems = virtualized
+    ? videoPage.items.slice(Math.min(gridWin.start, videoPage.items.length), Math.min(gridWin.end, videoPage.items.length))
+    : videoPage.items;
+  const topPad = virtualized
+    ? Math.floor(Math.min(gridWin.start, videoPage.items.length) / gridMetrics.cols) * gridMetrics.rowH
+    : 0;
+  const bottomPad = virtualized
+    ? Math.max(0, Math.ceil((videoPage.items.length - gridWin.end) / gridMetrics.cols) * gridMetrics.rowH)
+    : 0;
+
   if (!ready) {
     return <BootSplash stage={0} fading={false} />;
   }
@@ -782,7 +846,13 @@ export default function App() {
     <div className="app-shell">
       <Sidebar
         view={view}
-        onView={(v) => { pushLoc(); setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set()); }}
+        onView={(v) => {
+          pushLoc();
+          setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]);
+          // 「最近入库」是固定语义：跨所有文件夹、按真实入库顺序，不能沿用上一个视图的排序
+          if (v === "latest") { setSort("added"); setSortRev(false); }
+          setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set());
+        }}
         tags={tags}
         activeTag={activeTag}
         onTag={(t) => { pushLoc(); setActiveTag(t); setActiveCollection(null); setView("all"); setStatsOpen(false); setTagsOpen(false); }}
@@ -809,7 +879,7 @@ export default function App() {
         editOpen={editOpen}
       />
 
-      <main className="main">
+      <main className="main" ref={mainRef}>
         {showPanel ? (
           statsOpen ? <StatsPanel stats={stats} onClose={() => setStatsOpen(false)} onOpenVideo={(id) => {
             setStatsOpen(false);
@@ -933,6 +1003,7 @@ export default function App() {
                   <span className="folder-sort">
                     <button className={folderSort === "name" ? "on" : ""} onClick={() => setFolderSort("name")}>名称</button>
                     <button className={folderSort === "count" ? "on" : ""} onClick={() => setFolderSort("count")}>数量</button>
+                    <button className={folderSort === "added" ? "on" : ""} onClick={() => setFolderSort("added")} title="按夹内最新入库时间排，找新片最快">最新入库</button>
                   </span>
                 </div>
                 <div className="folder-grid">
@@ -941,7 +1012,9 @@ export default function App() {
                   ) : [...folders]
                     .sort((a, b) => (folderSort === "name"
                       ? a.leaf.localeCompare(b.leaf, "zh-CN")
-                      : b.count - a.count))
+                      : folderSort === "added"
+                        ? b.latest_added - a.latest_added
+                        : b.count - a.count))
                     .map((f) => (
                       <button className="folder-card" key={f.id} onClick={() => enterFolder([...folderPath, f.leaf])}
                         title={f.name + " · " + f.count + " 条"}>
@@ -1034,6 +1107,7 @@ export default function App() {
               <>
                 <div
                   className="video-grid"
+                  ref={gridRef}
                   onContextMenu={(e) => {
                     const el = (e.target as HTMLElement).closest("[data-video-id]");
                     if (!el) return;
@@ -1045,7 +1119,8 @@ export default function App() {
                     setMenu({ x: e.clientX, y: e.clientY, ids });
                   }}
                 >
-                  {videoPage.items.map((v) => (
+                  {topPad > 0 && <div className="grid-spacer" style={{ height: topPad }} aria-hidden />}
+                  {visibleItems.map((v) => (
                     <VideoCard
                       key={`${v.id}`}
                       video={v}
@@ -1063,6 +1138,7 @@ export default function App() {
                       onDragEnd={onCardDragEnd}
                     />
                   ))}
+                  {bottomPad > 0 && <div className="grid-spacer" style={{ height: bottomPad }} aria-hidden />}
                 </div>
                 {videoPage.items.length < videoPage.total && (
                   <div className="load-more" ref={sentinelRef}>

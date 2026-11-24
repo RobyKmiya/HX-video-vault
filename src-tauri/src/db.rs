@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -9,7 +10,7 @@ use crate::models::{
     VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -133,7 +134,7 @@ pub fn open_library(root: &Path) -> Result<LibraryContext, String> {
         .map_err(|e| e.to_string())?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .map_err(|e| e.to_string())?;
-    migrate(&conn)?;
+    migrate(&conn, root)?;
     daily_backup(root, &db_path);
     Ok(LibraryContext {
         root: root.to_path_buf(),
@@ -142,7 +143,99 @@ pub fn open_library(root: &Path) -> Result<LibraryContext, String> {
     })
 }
 
-fn migrate(conn: &Connection) -> Result<(), String> {
+/// 路径比较用的规范化键：Windows 上盘符大小写和 / 与 \ 混用都指向同一个文件，
+/// 历史版本按原始字符串登记，导致同一部影片出现多条记录。
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+/// v6 清理：规范化路径分隔符、合并重复登记、删除不在当前库根下的历史残留。
+/// 关联记录（标签/收藏/封面/观看历史）先改挂到保留的那条，再删重复视频行。
+fn normalize_and_dedupe_videos(conn: &Connection, root: &Path) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(i64, String, i64, i64)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, path, entry_index, trashed FROM videos ORDER BY trashed ASC, id ASC")
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(Result::ok).collect()
+    };
+
+    // 同 (规范化路径, 条目序号) 只留最早/未回收的一条
+    let mut keepers: HashMap<(String, i64), i64> = HashMap::new();
+    let mut duplicates: Vec<(i64, i64)> = Vec::new();
+    for (id, path, idx, _) in &rows {
+        let key = (path_key(path), *idx);
+        if let Some(keep) = keepers.get(&key) {
+            duplicates.push((*id, *keep));
+        } else {
+            keepers.insert(key, *id);
+        }
+    }
+    for (dup, keep) in &duplicates {
+        for sql in [
+            "INSERT OR IGNORE INTO video_tags(video_id, tag_id) SELECT ?1, tag_id FROM video_tags WHERE video_id=?2",
+            "INSERT OR IGNORE INTO collection_videos(collection_id, video_id, added_at, position) SELECT collection_id, ?1, added_at, position FROM collection_videos WHERE video_id=?2",
+            "INSERT OR IGNORE INTO video_covers(video_id, path, created_at) SELECT ?1, path, created_at FROM video_covers WHERE video_id=?2",
+        ] {
+            tx.execute(sql, params![keep, dup]).map_err(|e| e.to_string())?;
+        }
+        tx.execute("UPDATE watch_history SET video_id=?1 WHERE video_id=?2", params![keep, dup])
+            .map_err(|e| e.to_string())?;
+        for table in ["video_tags", "collection_videos", "video_covers"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE video_id=?1"), params![dup])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute("DELETE FROM videos WHERE id=?1", params![dup])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 统一成正斜杠→反斜杠；大小写不敏感的重复已在上面合并，这里不会撞 UNIQUE
+    for (id, path, _, _) in &rows {
+        if duplicates.iter().any(|(dup, _)| dup == id) {
+            continue;
+        }
+        let normalized = path.replace('/', "\\");
+        if normalized != *path {
+            tx.execute("UPDATE videos SET path=?1 WHERE id=?2", params![normalized, id])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 清掉库根之外的旧记录（历史上库根是 F:\Hthings，扫到了 B / BENZI / MOST 等）
+    let root_prefix = format!("{}\\", path_key(&root.to_string_lossy()).trim_end_matches('\\'));
+    let remaining: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, path FROM videos")
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(Result::ok).collect()
+    };
+    for (id, path) in &remaining {
+        let key = path_key(path);
+        if key == root_prefix.trim_end_matches('\\') || key.starts_with(&root_prefix) {
+            continue;
+        }
+        // 外键级联会清掉关联记录
+        tx.execute("DELETE FROM videos WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn migrate(conn: &Connection, root: &Path) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);
@@ -320,6 +413,10 @@ CREATE TABLE IF NOT EXISTS download_tasks (
             .map_err(|e| e.to_string())?;
         }
     }
+    // v5 → v6：统一路径分隔符、按规范化路径合并重复登记，并清掉库根之外的历史残留
+    if version < 6 {
+        normalize_and_dedupe_videos(conn, root)?;
+    }
     if version < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| e.to_string())?;
@@ -464,11 +561,12 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<VideoItem, String> {
     conn.query_row(&sql, params![id], map_video).map_err(|e| e.to_string())
 }
 
-/// 最近加入：批量导入的 added_at 常常整批相同，用 mtime/id 兜底，
-/// 否则 SQLite 在同值时顺序不定，新导入的视频会被挤到后面看不见。
+/// 最近加入：批量导入的 added_at 是秒级，常常整批相同。此时优先按 id 倒序
+/// （id 是递增的入库次序），再按 mtime 兜底；不能用 mtime 当第二键，否则
+/// 导入时继承了源文件旧 mtime 的新片会被压到后面，看不到「最新」。
 fn added_order(desc: bool) -> String {
     let d = if desc { "DESC" } else { "ASC" };
-    format!("v.added_at {d}, v.mtime {d}, v.id {d}")
+    format!("v.added_at {d}, v.id {d}, v.mtime {d}")
 }
 
 pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, String> {
@@ -481,6 +579,7 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         "trash" => where_parts.push("v.trashed=1".into()),
         "favorites" => where_parts.push("v.favorite=1 AND v.trashed=0".into()),
         "recent" => where_parts.push("v.last_watched_at>0 AND v.trashed=0".into()),
+        "latest" => where_parts.push("v.trashed=0".into()),
         "unwatched" => where_parts.push("v.watch_count=0 AND v.trashed=0".into()),
         "completed" => where_parts.push("v.completed=1 AND v.trashed=0".into()),
         "watchlist" => {
@@ -539,6 +638,13 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
         "duration" => format!("v.duration_sec {}", if desc { "DESC" } else { "ASC" }),
         "rating" => format!("v.rating {}", if desc { "DESC" } else { "ASC" }),
         _ => added_order(desc),
+    };
+    // 「最近入库」是固定语义的平铺视图：跨所有文件夹按真实入库顺序看，
+    // 不受 sort 下拉影响，进不了文件夹也看不到手动位次。
+    let order = if q.view.as_deref() == Some("latest") {
+        added_order(true)
+    } else {
+        order
     };
     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
         binds.iter().map(|b| b.as_ref()).collect();
@@ -1034,15 +1140,22 @@ pub fn list_folder_children(
         Some(p) => ("LIKE", format!("%{}{}%", escape_like(p), escape_like(SEP))),
     };
     let sql = format!(
-        "SELECT c.id, c.name, COUNT(cv.video_id)
-         FROM collections c LEFT JOIN collection_videos cv ON cv.collection_id = c.id
+        "SELECT c.id, c.name, COUNT(cv.video_id), COALESCE(MAX(v.added_at), 0)
+         FROM collections c
+         LEFT JOIN collection_videos cv ON cv.collection_id = c.id
+         LEFT JOIN videos v ON v.id = cv.video_id
          WHERE c.kind='auto' AND c.deleted_at=0 AND c.name {like_kw} ? ESCAPE '\\'
          GROUP BY c.id ORDER BY c.name COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![bind], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
 
@@ -1052,7 +1165,7 @@ pub fn list_folder_children(
     let cover_dir = LibraryContext::vault_dir(root).join("cache").join("cover");
 
     let mut out = Vec::new();
-    for (id, name, count) in rows.filter_map(Result::ok) {
+    for (id, name, count, latest_added) in rows.filter_map(Result::ok) {
         let leaf = match parent {
             None => name.clone(),
             Some(p) => name[p.len() + SEP.len()..].to_string(),
@@ -1085,7 +1198,7 @@ pub fn list_folder_children(
                 }
             }
         }
-        out.push(crate::models::FolderInfo { id, name, leaf, count, covers });
+        out.push(crate::models::FolderInfo { id, name, leaf, count, latest_added, covers });
     }
     Ok(out)
 }
@@ -1102,7 +1215,7 @@ pub fn sync_folder_collections(
 ) -> Result<usize, String> {
     use std::collections::{HashMap, HashSet};
 
-    let root_str = root.to_string_lossy().to_string();
+    let root_str = root.to_string_lossy().replace('/', "\\");
     let seen: HashSet<&String> = seen_paths.iter().collect();
 
     // 本次在盘上的视频 id → 所在相对目录（空串 = 根目录，跳过）
@@ -1725,6 +1838,44 @@ mod tests {
     }
 
     #[test]
+    fn v6_migration_normalizes_paths_and_merges_duplicates() {
+        let (root, ctx) = temp_lib();
+        ctx.conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+        let good = format!("{}\\0-199\\dup.mp4", root.to_string_lossy());
+        let slashy = good.replace('\\', "/");
+        for (path, added) in [
+            (good.as_str(), 1_i64),
+            (slashy.as_str(), 2_i64),
+            ("F:\\outside\\ghost.mp4", 3_i64),
+        ] {
+            ctx.conn.execute(
+                "INSERT INTO videos (path, file_name, container, size_bytes, mtime, added_at) VALUES (?1, 'x.mp4', 'mp4', 1024, 100, ?2)",
+                params![path, added],
+            ).unwrap();
+        }
+        ctx.conn.execute("INSERT INTO tags(name) VALUES ('迁移测试')", []).unwrap();
+        ctx.conn.execute(
+            "INSERT INTO video_tags(video_id, tag_id) SELECT id, 1 FROM videos",
+            [],
+        ).unwrap();
+        drop(ctx);
+
+        let ctx = open_library(&root).unwrap();
+        let paths: Vec<String> = {
+            let mut stmt = ctx.conn.prepare("SELECT path FROM videos").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect()
+        };
+        assert_eq!(paths.len(), 1, "同一文件的两种路径写法应合并，库外残留应清掉");
+        assert_eq!(paths[0], good.replace('/', "\\"));
+        let tag_rows: i64 = ctx.conn.query_row("SELECT COUNT(*) FROM video_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_rows, 1, "重复行的标签应改挂到保留行");
+        let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(ctx);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn schema_upsert_is_idempotent_per_entry() {
         let (root, ctx) = temp_lib();
         assert_eq!(upsert_video(&ctx.conn, &rec("D:\\a.zip", 0)).unwrap(), true);
@@ -2090,6 +2241,9 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
+            // v6 会清掉库根外的历史残留，测试数据挪到本库根下
+            let old = root.join("old.mp4").to_string_lossy().replace('/', "\\");
+            conn.execute("UPDATE videos SET path=?1 WHERE path='K:/old.mp4'", params![old]).unwrap();
         }
         let ctx = open_library(&root).expect("v3 老库应能迁移");
         let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
@@ -2144,6 +2298,11 @@ mod tests {
                  PRAGMA user_version = 4;",
             )
             .unwrap();
+            // v6 会清掉库根外的历史残留，测试数据挪到本库根下
+            for (old, name) in [("K:/a.mp4", "a.mp4"), ("K:/b.mp4", "b.mp4"), ("K:/c.mp4", "c.mp4")] {
+                let p = root.join(name).to_string_lossy().replace('/', "\\");
+                conn.execute("UPDATE videos SET path=?1 WHERE path=?2", params![p, old]).unwrap();
+            }
         }
         let ctx = open_library(&root).expect("v4 老库应能迁移");
         let version: i64 = ctx.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
@@ -2277,9 +2436,10 @@ mod tests {
         assert_eq!(names("-mtime"), vec!["b.mp4", "c.mp4", "a.mp4"], "-mtime 取反");
         assert_eq!(names("title"), vec!["a.mp4", "b.mp4", "c.mp4"], "title 默认升序");
         assert_eq!(names("-title"), vec!["c.mp4", "b.mp4", "a.mp4"], "-title 降序");
-        // 批量导入时 added_at 整批相同：用 mtime 兜底，最近改过的排前面
-        assert_eq!(names("added"), vec!["a.mp4", "c.mp4", "b.mp4"], "同秒入库按 mtime 兜底");
-        assert_eq!(names("-added"), vec!["b.mp4", "c.mp4", "a.mp4"], "逆序也稳定");
+        // 批量导入时 added_at 整批相同：按 id 倒序（后入库的在前）兜底，
+        // 不能用源文件继承来的旧 mtime 当第二键，否则新片会被压到后面。
+        assert_eq!(names("added"), vec!["c.mp4", "b.mp4", "a.mp4"], "同秒入库按 id 倒序兜底");
+        assert_eq!(names("-added"), vec!["a.mp4", "b.mp4", "c.mp4"], "逆序也稳定");
 
         drop(ctx);
         let _ = fs::remove_dir_all(&root);
