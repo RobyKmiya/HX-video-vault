@@ -148,6 +148,26 @@ body.is-splitting * { cursor: col-resize !important; }
   backdrop-filter: blur(12px); display: flex; gap: 10px; align-items: center;
   padding: 18px 0 14px; border-bottom: 1px solid var(--line);
 }
+
+/* 卡片大小：− 百分比 + 三段一体，点百分比回 100% */
+.zoom-ctl {
+  display: inline-flex; align-items: center; flex: none;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); overflow: hidden;
+}
+.zoom-btn {
+  width: 26px; height: 28px; border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 15px; line-height: 1; display: grid; place-items: center;
+}
+.zoom-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.zoom-btn:disabled { opacity: .32; cursor: default; }
+.zoom-val {
+  min-width: 44px; height: 28px; border: 0;
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: .2px;
+}
+.zoom-val:hover { background: var(--surface-2); color: var(--text); }
 .search-box {
   flex: 1; max-width: 520px; display: flex; align-items: center; gap: 9px; background: var(--surface);
   border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; height: 38px; color: var(--muted);
@@ -197,8 +217,8 @@ body.is-splitting * { cursor: col-resize !important; }
 /* 统一 16:9 对齐网格：所有缩略图同尺寸、同行对齐；竖屏靠 contain 两侧留黑，不再按视频比例撑成瀑布流 */
 .video-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
-  gap: 18px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 208px), 1fr));
+  gap: var(--grid-gap, 16px);
   align-items: start;
 }
 /* 窗口化渲染的上下占位：撑出未渲染卡片的高度，滚动条位置保持真实 */
@@ -758,3 +778,22 @@ body.is-splitting * { cursor: col-resize !important; }
   min-width: 132px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px;
   background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer; font-family: inherit;
 }
+
+/* ---------- 重复清理 ---------- */
+.dedupe-list { display: flex; flex-direction: column; gap: 10px; max-height: 52vh; overflow-y: auto; }
+.dedupe-group { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.dedupe-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 11px; background: var(--surface-2); font-size: 12.5px;
+}
+.dedupe-head .truncate { flex: 1; min-width: 0; }
+.dedupe-tag {
+  flex: none; font-size: 10px; letter-spacing: .4px; padding: 2px 6px;
+  border-radius: 4px; background: var(--accent-soft); color: var(--accent);
+}
+.dedupe-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 11px; font-size: 12px; border-top: 1px solid var(--line);
+}
+.dedupe-row .truncate { flex: 1; min-width: 0; }
+.dedupe-row .muted { flex: none; font-size: 11px; }

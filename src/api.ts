@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
+  DuplicateGroup,
+  FingerprintProgress,
   FolderInfo,
   DownloadTask,
   EditReport,
@@ -142,4 +144,16 @@ export const api = {
   /** 把所选视频打包成 zip（保留原文件），返回压缩包路径 */
   compressVideos: (ids: number[], name?: string) =>
     invoke<string>("compress_videos", { ids, name: name ?? null }),
+  /** 后台算内容指纹（查重第一步）。已在跑时直接返回 */
+  dedupeScan: () => invoke<void>("dedupe_scan"),
+  dedupeStatus: () => invoke<FingerprintProgress>("dedupe_status"),
+  /** 算出指纹后才能拿到重复组 */
+  dedupeGroups: () => invoke<DuplicateGroup[]>("dedupe_groups"),
+  /** 按后端建议（看过次数多者留）把所有重复副本送进回收站，返回处理条数 */
+  dedupeApply: () => invoke<number>("dedupe_apply"),
+  /** 精确处理：[[保留 id, [丢弃 id...]], ...] */
+  dedupeApplySelected: (pairs: [number, number[]][]) =>
+    invoke<number>("dedupe_apply_selected", { pairs }),
+  /** 清掉回收站里文件已不在的幽灵行 */
+  purgeMissingTrashed: () => invoke<number>("purge_missing_trashed"),
 };

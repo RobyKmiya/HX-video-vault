@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Dispatch, DragEvent, MouseEvent as ReactMouseEvent, SetStateAction } from "react";
+import type { CSSProperties, Dispatch, DragEvent, MouseEvent as ReactMouseEvent, SetStateAction } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -11,6 +11,7 @@ import { Player } from "./components/Player";
 import { StatsPanel } from "./components/StatsPanel";
 import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
+import { DedupePanel } from "./components/DedupePanel";
 import { EditPanel } from "./components/EditPanel";
 import { MoveDialog } from "./components/MoveDialog";
 import { RenameDialog } from "./components/RenameDialog";
@@ -67,6 +68,14 @@ const SCAN_PHASE: Record<ScanProgress["phase"], string> = {
   done: "完成",
 };
 
+/** 影片墙卡片基准宽度 / 间距（1.0 倍率下的值，与 App.css 的兜底值一致） */
+const GRID_CARD_BASE = 208;
+const GRID_GAP_BASE = 16;
+const GRID_ZOOM_MIN = 0.6;
+const GRID_ZOOM_MAX = 1.8;
+/** 快捷键与按钮每次调多少 */
+const GRID_ZOOM_STEP = 0.1;
+
 const EMPTY_PAGE: VideoPage = { items: [], total: 0, page: 1, page_size: 48 };
 const EMPTY_STATS: Stats = {
   video_count: 0, archive_count: 0, total_bytes: 0, total_duration_sec: 0,
@@ -79,7 +88,7 @@ export default function App() {
   const [info, setInfo] = useState<LibraryInfo | null>(null);
   const [settings, setSettings] = useState<Settings>({
     library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto", mpv_path: null,
-    import_root: null, double_click: "play", immersive_default: false, show_card_info: true,
+    import_root: null, double_click: "play", immersive_default: false, show_card_info: true, grid_zoom: 1,
   });
   const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -107,6 +116,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [dedupeOpen, setDedupeOpen] = useState(false);
   // 从详情页/批量栏带进剪辑面板的素材；面板关闭时清空，避免下次打开误带入
   const [editPrefill, setEditPrefill] = useState<VideoItem[] | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -240,7 +250,7 @@ export default function App() {
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return;
       e.preventDefault();
-      if (player || statsOpen || tagsOpen || downloadOpen || editOpen || detailId || settingsOpen || sheetOpen || collectionsOpen) return;
+      if (player || statsOpen || tagsOpen || downloadOpen || editOpen || dedupeOpen || detailId || settingsOpen || sheetOpen || collectionsOpen) return;
       if (e.button === 3) navFnRef.current.back(); else navFnRef.current.forward();
     };
     const swallow = (e: MouseEvent) => { if (e.button === 3 || e.button === 4) e.preventDefault(); };
@@ -250,7 +260,7 @@ export default function App() {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("auxclick", swallow);
     };
-  }, [player, statsOpen, tagsOpen, downloadOpen, editOpen, detailId, settingsOpen, sheetOpen, collectionsOpen]);
+  }, [player, statsOpen, tagsOpen, downloadOpen, editOpen, dedupeOpen, detailId, settingsOpen, sheetOpen, collectionsOpen]);
 
   const enterFolder = useCallback((path: string[]) => {
     pushLoc();
@@ -790,16 +800,36 @@ export default function App() {
   const gridRef = useRef<HTMLDivElement | null>(null);
   const [gridWin, setGridWin] = useState({ start: 0, end: 96 });
   const [gridMetrics, setGridMetrics] = useState({ cols: 4, rowH: 250 });
+
+  // ── 影片墙缩放：一把控制卡片最小宽度，窗口化行高跟着一起算 ──
+  // 208px 是 0.1.25 定下的基准尺寸，缩放以它为 1.0 原点，避免改一次要重算历史布局。
+  const zoom = settings.grid_zoom ?? 1;
+  const cardMin = Math.round(GRID_CARD_BASE * zoom);
+  const gridGap = Math.max(6, Math.round(GRID_GAP_BASE * zoom));
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const zoomSaveTimer = useRef<number | null>(null);
+  const applyZoom = useCallback((next: number) => {
+    const z = Math.min(GRID_ZOOM_MAX, Math.max(GRID_ZOOM_MIN, Math.round(next * 100) / 100));
+    setSettings((s) => (s.grid_zoom === z ? s : { ...s, grid_zoom: z }));
+    // 连续拖动时不必每次都落盘，停手 400ms 再写
+    if (zoomSaveTimer.current) window.clearTimeout(zoomSaveTimer.current);
+    zoomSaveTimer.current = window.setTimeout(() => {
+      void api.updateSettings({ ...settingsRef.current, grid_zoom: z }).catch(() => {});
+    }, 400);
+  }, []);
+  useEffect(() => () => { if (zoomSaveTimer.current) window.clearTimeout(zoomSaveTimer.current); }, []);
+
   const calcGridMetrics = useCallback(() => {
     const main = mainRef.current;
     if (!main) return null;
     const chrome = window.innerWidth <= 900 ? 36 : 56;
-    const avail = Math.max(208, main.clientWidth - chrome);
-    const cols = Math.max(1, Math.floor((avail + 16) / (208 + 16)));
-    const cardW = Math.max(208, (avail - (cols - 1) * 16) / cols);
-    const rowH = Math.round(cardW * 9 / 16 + (settings.show_card_info === false ? 0 : 78) + 18);
+    const avail = Math.max(cardMin, main.clientWidth - chrome);
+    const cols = Math.max(1, Math.floor((avail + gridGap) / (cardMin + gridGap)));
+    const cardW = Math.max(cardMin, (avail - (cols - 1) * gridGap) / cols);
+    const rowH = Math.round(cardW * 9 / 16 + (settings.show_card_info === false ? 0 : 78) + gridGap);
     return { cols, rowH };
-  }, [settings.show_card_info]);
+  }, [settings.show_card_info, cardMin, gridGap]);
   const updateGridWindow = useCallback(() => {
     const main = mainRef.current;
     const grid = gridRef.current;
@@ -827,6 +857,21 @@ export default function App() {
     ro.observe(main);
     return () => { main.removeEventListener("scroll", onScroll); ro.disconnect(); };
   }, [updateGridWindow, view, folderPath, sort]);
+
+  // Ctrl + 滚轮调卡片大小。只在按住 Ctrl 时接管，普通滚轮照常滚动，
+  // 避免出现画匣里那种「两个 wheel 处理器抢事件」的问题。
+  useEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const dir = e.deltaY > 0 ? -1 : 1;
+      applyZoom((settingsRef.current.grid_zoom ?? 1) + dir * GRID_ZOOM_STEP);
+    };
+    main.addEventListener("wheel", onWheel, { passive: false });
+    return () => main.removeEventListener("wheel", onWheel);
+  }, [applyZoom, ready]);
 
   // 「最近入库」首屏后台预热：错开 180ms 串行抽帧，不让新片卡在占位图上
   useEffect(() => {
@@ -875,7 +920,7 @@ export default function App() {
     );
   }
 
-  const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen;
+  const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen || dedupeOpen;
 
   return (
     <div className="app-shell">
@@ -887,7 +932,7 @@ export default function App() {
           setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]);
           // 「最近入库」是固定语义：跨所有文件夹、按真实入库顺序，不能沿用上一个视图的排序
           if (v === "latest") { setSort("added"); setSortRev(false); }
-          setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setSelected(new Set());
+          setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); setSelected(new Set());
         }}
         tags={tags}
         activeTag={activeTag}
@@ -904,10 +949,10 @@ export default function App() {
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
         onReordered={() => void refreshMeta()}
-        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
-        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
-        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); }}
-        onEdit={() => { setEditOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); }}
+        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); }}
+        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); }}
+        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); setDedupeOpen(false); }}
+        onEdit={() => { setEditOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setDedupeOpen(false); }}
         onSettings={() => setSettingsOpen(true)}
         statsOpen={statsOpen}
         tagsOpen={tagsOpen}
@@ -930,6 +975,8 @@ export default function App() {
             setStatsOpen(false);
             void openById(id);
           }} />
+            : dedupeOpen ? <DedupePanel onClose={() => setDedupeOpen(false)}
+                onChanged={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
             : downloadOpen ? <DownloadPanel tags={tags} onClose={() => setDownloadOpen(false)}
                 onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
             : editOpen ? <EditPanel prefill={editPrefill}
@@ -966,6 +1013,16 @@ export default function App() {
                 <Icon name="camera" size={16} className={sheet.running ? "spin" : ""} />
                 {sheetLive ? `${sheetLive.done}/${sheetLive.total}` : sheet.pending > 0 ? `预览图 缺 ${sheet.pending}` : "预览图"}
               </button>
+              <button className="icon-btn" onClick={() => { setDedupeOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); }}
+                title="重复清理：按内容指纹找同一份视频的多份副本"><Icon name="merge" size={17} /></button>
+              <div className="zoom-ctl" title="卡片大小：点 +/-，或按住 Ctrl 滚滚轮">
+                <button className="zoom-btn" onClick={() => applyZoom(zoom - GRID_ZOOM_STEP)}
+                  disabled={zoom <= GRID_ZOOM_MIN + 1e-6} title="缩小卡片">−</button>
+                <button className="zoom-val" onClick={() => applyZoom(1)}
+                  title={`当前 ${Math.round(zoom * 100)}%，点一下回到 100%`}>{Math.round(zoom * 100)}%</button>
+                <button className="zoom-btn" onClick={() => applyZoom(zoom + GRID_ZOOM_STEP)}
+                  disabled={zoom >= GRID_ZOOM_MAX - 1e-6} title="放大卡片">+</button>
+              </div>
               <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="设置"><Icon name="settings" size={18} /></button>
             </header>
 
@@ -1153,6 +1210,7 @@ export default function App() {
                 <div
                   className="video-grid"
                   ref={gridRef}
+                  style={{ "--card-min": `${cardMin}px`, "--grid-gap": `${gridGap}px` } as CSSProperties}
                   onContextMenu={(e) => {
                     const el = (e.target as HTMLElement).closest("[data-video-id]");
                     if (!el) return;

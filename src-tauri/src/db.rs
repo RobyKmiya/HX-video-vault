@@ -6,11 +6,11 @@ use std::time::{Duration, SystemTime};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::models::{
-    Collection, DayCount, DownloadTask, LibraryInfo, Stats, Tag, VideoItem, VideoPage, VideoPatch,
-    VideoQuery, WatchRecord, WatchUpdate,
+    Collection, DayCount, DownloadTask, DuplicateGroup, DuplicateItem, LibraryInfo, Stats, Tag,
+    VideoItem, VideoPage, VideoPatch, VideoQuery, WatchRecord, WatchUpdate,
 };
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -235,6 +235,185 @@ fn normalize_and_dedupe_videos(conn: &Connection, root: &Path) -> Result<(), Str
     Ok(())
 }
 
+// ── 内容查重 ──────────────────────────────────────────────────────────
+// 路径去重（normalize_and_dedupe_videos）只认「同一条路径登记了两次」。
+// 用户把同一个文件复制进两个区间夹时路径不同，那套逻辑看不见，库里的
+// 真重复就是这么攒出来的（实测 39 组、23.2GB）。这里按内容指纹找。
+
+/// 取一批还没算指纹的活跃视频（id, path, size）。按大小倒序，
+/// 大文件先算——它们才是空间大头，早点出结果早点能清理。
+pub fn videos_needing_fingerprint(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, String, i64)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, path, size_bytes FROM videos
+             WHERE trashed=0 AND fingerprint='' AND size_bytes>0
+             ORDER BY size_bytes DESC, id ASC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(rows)
+}
+
+/// 写入一条指纹。文件读不出来（掉盘、被删）时写 `!missing` 占位，
+/// 免得下一轮又把它捞出来反复重试。
+pub fn set_fingerprint(conn: &Connection, id: i64, fp: &str) -> Result<(), String> {
+    conn.execute("UPDATE videos SET fingerprint=?1 WHERE id=?2", params![fp, id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 指纹进度：(已算, 待算总数)
+pub fn fingerprint_progress(conn: &Connection) -> Result<(i64, i64), String> {
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM videos WHERE trashed=0 AND size_bytes>0 AND fingerprint NOT LIKE '!%'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let done: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM videos WHERE trashed=0 AND size_bytes>0 AND fingerprint<>'' AND fingerprint NOT LIKE '!%'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((done, total))
+}
+
+fn dup_item_from_row(r: &Row) -> rusqlite::Result<DuplicateItem> {
+    let path: String = r.get(1)?;
+    let exists = Path::new(&path).is_file();
+    Ok(DuplicateItem {
+        id: r.get(0)?,
+        path,
+        file_name: r.get(2)?,
+        size_bytes: r.get(3)?,
+        watch_count: r.get(4)?,
+        last_watched_at: r.get(5)?,
+        added_at: r.get(6)?,
+        exists,
+    })
+}
+
+/// 找内容重复的组。保留策略：看过次数最多的那份，其次看得最近的，
+/// 再次入库最早的——用户已经看过的副本留在原地，省得进度一起丢掉。
+pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT fingerprint, COUNT(*) FROM videos
+             WHERE trashed=0 AND fingerprint<>'' AND fingerprint NOT LIKE '!%'
+             GROUP BY fingerprint HAVING COUNT(*)>1
+             ORDER BY SUM(size_bytes) DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let groups: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+
+    let mut out = Vec::new();
+    for (fp, _) in groups {
+        let mut inner = conn
+            .prepare(
+                "SELECT id, path, file_name, size_bytes, watch_count, last_watched_at, added_at
+                 FROM videos WHERE trashed=0 AND fingerprint=?1
+                 ORDER BY watch_count DESC, last_watched_at DESC, added_at ASC, id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut items: Vec<DuplicateItem> = inner
+            .query_map(params![fp], dup_item_from_row)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        if items.len() < 2 {
+            continue;
+        }
+        let keep = items.remove(0);
+        let wasted_bytes = items.iter().map(|i| i.size_bytes).sum();
+        let size_bytes = keep.size_bytes;
+        out.push(DuplicateGroup { fingerprint: fp, size_bytes, keep, others: items, wasted_bytes });
+    }
+    Ok(out)
+}
+
+/// 把重复副本标记进回收站（不删文件，留给用户在回收站确认后自己删）。
+/// 关联的标签/收藏夹关系转到保留项上，进度不丢。
+pub fn mark_duplicates(conn: &Connection, keep_id: i64, drop_ids: &[i64]) -> Result<usize, String> {
+    if drop_ids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let now = now_secs();
+    let mut n = 0usize;
+    for dup in drop_ids {
+        if *dup == keep_id {
+            continue;
+        }
+        // 保留项不在收藏夹里、副本在的话，把副本的归属转过去
+        tx.execute(
+            "INSERT OR IGNORE INTO collection_videos(collection_id, video_id, added_at, position)
+             SELECT collection_id, ?1, added_at, position FROM collection_videos WHERE video_id=?2",
+            params![keep_id, dup],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO video_tags(video_id, tag_id) SELECT ?1, tag_id FROM video_tags WHERE video_id=?2",
+            params![keep_id, dup],
+        )
+        .map_err(|e| e.to_string())?;
+        let changed = tx
+            .execute(
+                "UPDATE videos SET trashed=1, dedup_of=?1, last_watched_at=COALESCE(NULLIF(last_watched_at,0), ?2)
+                 WHERE id=?3 AND trashed=0",
+                params![keep_id, now, dup],
+            )
+            .map_err(|e| e.to_string())?;
+        n += changed;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// 清掉「回收站里但文件已经不在盘上」的幽灵行，返回删掉的行数。
+/// 删文件没清库会攒出这种行：统计面板显示的回收站占用是假的。
+pub fn purge_missing_trashed(conn: &Connection) -> Result<usize, String> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, path FROM videos WHERE trashed=1")
+            .map_err(|e| e.to_string())?;
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect()
+    };
+    let dead: Vec<i64> = rows
+        .into_iter()
+        .filter(|(_, p)| !Path::new(p).is_file())
+        .map(|(id, _)| id)
+        .collect();
+    if dead.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for id in &dead {
+        tx.execute("DELETE FROM videos WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(dead.len())
+}
+
 fn migrate(conn: &Connection, root: &Path) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -271,12 +450,18 @@ CREATE TABLE IF NOT EXISTS videos (
   trashed INTEGER NOT NULL DEFAULT 0,
   contact_sheet TEXT NOT NULL DEFAULT '',
   tag_text TEXT NOT NULL DEFAULT '',
+  -- 内容指纹（大小 + 首尾各 8MB 的 blake3），查重用；空 = 还没算过
+  fingerprint TEXT NOT NULL DEFAULT '',
+  -- 被判定为重复后指向保留的那条的 id；0 = 自己就是保留项
+  dedup_of INTEGER NOT NULL DEFAULT 0,
   UNIQUE(path, entry_index)
 );
 CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(path);
 CREATE INDEX IF NOT EXISTS idx_videos_added ON videos(added_at DESC);
 CREATE INDEX IF NOT EXISTS idx_videos_watched ON videos(last_watched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_videos_size ON videos(size_bytes DESC);
+-- 注意：fingerprint 的索引不能放这里。老库的 videos 表已存在、可能还没有这一列，
+-- 批次里建索引会直接报 no such column。放到 v7 迁移补完列之后再建。
 
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -416,6 +601,24 @@ CREATE TABLE IF NOT EXISTS download_tasks (
     // v5 → v6：统一路径分隔符、按规范化路径合并重复登记，并清掉库根之外的历史残留
     if version < 6 {
         normalize_and_dedupe_videos(conn, root)?;
+    }
+    // v6 → v7：加内容指纹列，为「同一文件被复制到两个区间夹」这类重复提供判据
+    if version < 7 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(videos)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for (name, ddl) in [
+            ("fingerprint", "ALTER TABLE videos ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''"),
+            ("dedup_of", "ALTER TABLE videos ADD COLUMN dedup_of INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !cols.iter().any(|c| c == name) {
+                conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+            }
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_videos_fp ON videos(fingerprint)")
+            .map_err(|e| e.to_string())?;
     }
     if version < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))

@@ -141,6 +141,8 @@ export interface Settings {
   immersive_default?: boolean;
   /** 卡片下方是否显示文件名与时长/大小 */
   show_card_info?: boolean;
+  /** 影片墙卡片缩放倍率：0.6~1.8，1.0 = 默认 208px 宽。Ctrl+滚轮也能调 */
+  grid_zoom?: number;
 }
 
 /** 移动对话框的目标文件夹（库根 + 各 auto 文件夹） */
@@ -288,4 +290,34 @@ export interface PlaybackInfo {
   media_path: string;
   start_sec: number;
   player_hint: string;
+}
+
+/** 查重：同一内容的一个副本 */
+export interface DuplicateItem {
+  id: number;
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  watch_count: number;
+  last_watched_at: number;
+  added_at: number;
+  /** 文件此刻是否还在盘上 */
+  exists: boolean;
+}
+
+/** 查重：一组内容重复 videos（同一 fingerprint） */
+export interface DuplicateGroup {
+  fingerprint: string;
+  size_bytes: number;
+  /** 建议保留的副本 */
+  keep: DuplicateItem;
+  others: DuplicateItem[];
+  /** 清掉 others 能省下的字节 */
+  wasted_bytes: number;
+}
+
+export interface FingerprintProgress {
+  done: number;
+  total: number;
+  running: boolean;
 }

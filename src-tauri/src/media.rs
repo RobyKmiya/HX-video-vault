@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -17,6 +18,37 @@ const ARCHIVE_EXT: &[&str] = &["zip", "cbz"];
 /// 这里在生成记录时就归一化，配合 db v6 迁移把老库洗干净。
 pub fn path_key(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\")
+}
+
+/// 指纹取样块大小（首尾各读这么多）
+const FP_CHUNK: u64 = 8 * 1024 * 1024;
+
+/// 视频内容指纹：`blake3(大小 + 首 8MB + 尾 8MB)`。
+///
+/// 不读全量是因为库里动辄几个 GB 的合集，全量哈希要分钟级；同大小且首尾各 8MB
+/// 完全一致的视频，内容相同的概率极高。代价是「只改了中间片段」的剪辑变体会
+/// 被判成重复，所以上层只拿它来**提示**候选，删文件由用户确认。
+///
+/// 特意不把 mtime 算进去：跨盘复制会改 mtime，算进去就认不出重复了。
+pub fn fingerprint(path: &Path, size: u64) -> Option<String> {
+    if size == 0 {
+        return None;
+    }
+    let mut f = fs::File::open(path).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&size.to_le_bytes());
+    let mut buf = vec![0u8; FP_CHUNK as usize];
+
+    let n = f.read(&mut buf).ok()?;
+    hasher.update(&buf[..n]);
+
+    // 文件不超过两个块时，头部那一次已经把内容读全了
+    if size > FP_CHUNK * 2 {
+        f.seek(std::io::SeekFrom::Start(size - FP_CHUNK)).ok()?;
+        let n = f.read(&mut buf).ok()?;
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher.finalize().to_hex().to_string())
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]

@@ -258,3 +258,38 @@ pub struct EditReport {
     pub mode: String,
     pub note: String,
 }
+
+/// 查重结果里的一条：同一份内容的一个副本
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateItem {
+    pub id: i64,
+    pub path: String,
+    pub file_name: String,
+    pub size_bytes: i64,
+    pub watch_count: i64,
+    pub last_watched_at: i64,
+    pub added_at: i64,
+    /// 文件此刻是否还在盘上（不在 = 只是库里的残留登记）
+    pub exists: bool,
+}
+
+/// 一组内容重复的视频（同一 fingerprint）
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateGroup {
+    pub fingerprint: String,
+    pub size_bytes: i64,
+    /// 建议保留的副本（看过次数多的优先）
+    pub keep: DuplicateItem,
+    /// 其余副本
+    pub others: Vec<DuplicateItem>,
+    /// 清掉 others 能省下的字节
+    pub wasted_bytes: i64,
+}
+
+/// 指纹计算进度
+#[derive(Debug, Clone, Serialize)]
+pub struct FingerprintProgress {
+    pub done: i64,
+    pub total: i64,
+    pub running: bool,
+}

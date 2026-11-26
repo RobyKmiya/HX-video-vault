@@ -89,6 +89,27 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// 内容查重：算指纹 → 列重复组 → 可选把副本送进回收站
+    Dedupe {
+        /// 只算 N 条指纹就停（0 = 全算完）
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// 真的把重复副本标记进回收站（不加只报告）
+        #[arg(long)]
+        apply: bool,
+        /// 只清理回收站里文件已不在的幽灵行
+        #[arg(long)]
+        purge: bool,
+    },
+    /// 批量补预览图（接触表）：只补缺的，已有跳过
+    Sheets {
+        /// 本轮最多做 N 条（0 = 全做完）
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// 进度打印间隔（每 N 条一次）
+        #[arg(long, default_value_t = 50)]
+        verbose_every: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -348,6 +369,135 @@ fn run(cli: &Cli) -> Result<Value, String> {
                 "candidates": ids.len(),
                 "filled": filled,
                 "failed": failed,
+            }))
+        }
+        Command::Dedupe { limit, apply, purge } => {
+            let ctx = open(cli)?;
+            if *purge {
+                let removed = db::purge_missing_trashed(&ctx.conn)?;
+                return Ok(json!({ "ok": true, "action": "purge", "removed": removed }));
+            }
+            // 1) 算指纹：按大小倒序批量取，大文件先出结果
+            let mut hashed = 0usize;
+            loop {
+                let batch = db::videos_needing_fingerprint(&ctx.conn, 24)?;
+                if batch.is_empty() {
+                    break;
+                }
+                let mut hit_limit = false;
+                for (id, path, size) in &batch {
+                    let fp = media::fingerprint(std::path::Path::new(path), *size as u64)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "!missing".to_string());
+                    db::set_fingerprint(&ctx.conn, *id, &fp)?;
+                    hashed += 1;
+                    if *limit > 0 && hashed >= *limit {
+                        hit_limit = true;
+                        break;
+                    }
+                }
+                if hit_limit {
+                    break;
+                }
+            }
+            let (done, total) = db::fingerprint_progress(&ctx.conn)?;
+            // 2) 列重复组
+            let groups = db::duplicate_groups(&ctx.conn)?;
+            let wasted: i64 = groups.iter().map(|g| g.wasted_bytes).sum();
+            // 3) 可选：把副本标记进回收站（不删文件）
+            let mut applied = 0usize;
+            if *apply {
+                for g in &groups {
+                    let drops: Vec<i64> = g.others.iter().map(|i| i.id).collect();
+                    applied += db::mark_duplicates(&ctx.conn, g.keep.id, &drops)?;
+                }
+            }
+            Ok(json!({
+                "ok": true,
+                "action": "dedupe",
+                "hashed": hashed,
+                "progress": { "done": done, "total": total },
+                "groups": groups.len(),
+                "wasted_bytes": wasted,
+                "applied": applied,
+                "detail": groups.iter().take(20).map(|g| json!({
+                    "keep": g.keep.path,
+                    "size": g.size_bytes,
+                    "others": g.others.iter().map(|o| &o.path).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        Command::Sheets { limit, verbose_every } => {
+            let ctx = open(cli)?;
+            let mut ids = db::all_video_ids_for_sheet(&ctx.conn, true)?;
+            if *limit > 0 {
+                ids.truncate(*limit);
+            }
+            let cache = db::LibraryContext::vault_dir(&ctx.root).join("cache").join("contacts");
+            let total = ids.len();
+            // 抽帧是纯 CPU 活，单个 ffmpeg 要把整片线性解码一遍，串行做 1000 条得几小时。
+            // 这里开 3 个 worker，DB 访问用 Mutex 串起来（rusqlite 的 Connection 不是 Sync）。
+            let lib = std::sync::Mutex::new(ctx);
+            let cursor = std::sync::atomic::AtomicUsize::new(0);
+            let ok_count = std::sync::atomic::AtomicUsize::new(0);
+            let failed: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for _ in 0..3 {
+                    scope.spawn(|| loop {
+                        use std::sync::atomic::Ordering;
+                        let i = cursor.fetch_add(1, Ordering::SeqCst);
+                        if i >= ids.len() {
+                            break;
+                        }
+                        let id = ids[i];
+                        // 1) 解析出真实媒体路径（压缩包条目会在这里解出来）
+                        let source = {
+                            let Ok(guard) = lib.lock() else { break };
+                            match video_vault_lib::player::resolve(&guard, id) {
+                                Ok(info) => std::path::PathBuf::from(info.media_path),
+                                Err(e) => {
+                                    if let Ok(mut f) = failed.lock() {
+                                        f.push(format!("#{id}: {e}"));
+                                    }
+                                    continue;
+                                }
+                            }
+                        };
+                        if !source.is_file() {
+                            if let Ok(mut f) = failed.lock() {
+                                f.push(format!("#{id}: 文件不存在"));
+                            }
+                            continue;
+                        }
+                        // 2) ffmpeg 抽帧（不占锁，三个 worker 真并行）
+                        let out = cache.join(format!("{id}.jpg"));
+                        if let Err(e) = media::contact_sheet(&source, &out) {
+                            if let Ok(mut f) = failed.lock() {
+                                f.push(format!("#{id}: {e}"));
+                            }
+                            continue;
+                        }
+                        // 3) 写回元数据与预览图路径
+                        if let Ok(guard) = lib.lock() {
+                            video_vault_lib::player::backfill_meta(&guard, id, &source);
+                            let _ = db::set_contact_sheet(&guard.conn, id, &out.to_string_lossy());
+                        }
+                        let n = ok_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        if *verbose_every > 0 && n % *verbose_every == 0 {
+                            eprintln!("预览图进度 {n}/{total}");
+                        }
+                    });
+                }
+            });
+            let done = ok_count.load(std::sync::atomic::Ordering::SeqCst);
+            let failed = failed.into_inner().unwrap_or_default();
+            Ok(json!({
+                "ok": true,
+                "action": "sheets",
+                "total": total,
+                "done": done,
+                "failed": failed.len(),
+                "failures": failed.iter().take(20).collect::<Vec<_>>(),
             }))
         }
     }

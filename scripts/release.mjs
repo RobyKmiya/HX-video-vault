@@ -308,6 +308,19 @@ if (doInstall) {
   });
   if (doInstall) {
     step('桌面快捷方式校验/更新（指向最新安装位）', refreshShortcuts);
+    // WE 导出助手是影匣内置组件（tools/we-export，运行时在 %LOCALAPPDATA%\影匣\we-export）：
+    // 发版顺带重部署 + 重打 WE 注入补丁，让「影匣升级 = 助手与 vaultctl 同步更新」。
+    // 失败只警告不阻断发版 —— WE 没装的机器不该被这一步卡死。
+    step('部署 WE 导出助手（tools/we-export → 注入壁纸引擎）', () => {
+      try {
+        execFileSync(process.execPath, [path.join(ROOT, 'tools', 'we-export', 'install.mjs')],
+          { stdio: 'inherit', timeout: 120_000 });
+        ok('WE 导出助手已同步');
+      } catch (e) {
+        warn(`WE 导出助手部署失败（不影响影匣本体）：${String(e.message).slice(0, 120)}`);
+        warn('可在 tools/we-export 下手动跑 node install.mjs 重试');
+      }
+    });
     if (doReopen) step('重新打开影匣（显式 --reopen）', reopenApp);
     else console.log('  ! 按管理员规矩，装机后不自动打开；需要实机验收请手动双击桌面图标');
   }

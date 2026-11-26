@@ -47,11 +47,15 @@ pub struct Settings {
     /// 卡片下面是否显示文件名与信息
     #[serde(default = "default_show_card_info")]
     pub show_card_info: bool,
+    /// 影片墙卡片缩放倍率（0.6~1.8，1.0 = 默认 208px）。Ctrl+滚轮也能调。
+    #[serde(default = "default_grid_zoom")]
+    pub grid_zoom: f64,
 }
 
 fn default_player_pref() -> String { "auto".into() }
 fn default_double_click() -> String { "play".into() }
 fn default_show_card_info() -> bool { true }
+fn default_grid_zoom() -> f64 { 1.0 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -65,6 +69,7 @@ impl Default for Settings {
             double_click: "play".into(),
             immersive_default: false,
             show_card_info: true,
+            grid_zoom: 1.0,
         }
     }
 }
@@ -84,6 +89,10 @@ pub(crate) struct AppInner {
     edit_running: Arc<AtomicBool>,
     /// 剪辑任务现场（独立锁：进度刷新不挤占全局状态锁）
     edit_status: Arc<Mutex<crate::models::EditStatus>>,
+    /// 指纹计算是否在跑（防重复启动）
+    dedupe_running: Arc<AtomicBool>,
+    /// 指纹进度：已算 / 总数（独立锁，后台线程频繁写，不挤全局锁）
+    dedupe_progress: Arc<Mutex<(i64, i64)>>,
 }
 
 #[derive(Clone)]
@@ -124,6 +133,8 @@ impl AppState {
                     percent: 0.0,
                     message: String::new(),
                 })),
+                dedupe_running: Arc::new(AtomicBool::new(false)),
+                dedupe_progress: Arc::new(Mutex::new((0, 0))),
             })),
         }
     }
@@ -807,6 +818,121 @@ fn watch_history(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec
     let ctx = state.lock()?;
     db::watch_history(&library(&ctx)?.conn, limit.unwrap_or(50).clamp(1, 500))
 }
+
+// ── 内容查重 ──────────────────────────────────────────────────────────
+
+/// 后台算指纹。每批 12 个，算完放锁，避免长时间占着全局状态锁让 UI 卡。
+/// 大头文件优先（按 size 倒序取批），先出结果的正好是空间占用最大的那些。
+#[tauri::command]
+fn dedupe_scan(app: AppHandle) -> Result<(), String> {
+    // 先把 AppState 从 AppHandle 里摘出来（含 Arc），别让借用跟着进线程
+    let st: AppState = app.state::<AppState>().inner().clone();
+    {
+        let ctx = st.lock()?;
+        if ctx.dedupe_running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        ctx.dedupe_running.store(true, Ordering::SeqCst);
+    }
+    std::thread::spawn(move || {
+        loop {
+            let batch = {
+                let Ok(ctx) = st.lock() else { break };
+                let Ok(lib) = library(&ctx) else { break };
+                match db::videos_needing_fingerprint(&lib.conn, 12) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            for (id, path, size) in &batch {
+                let fp = media::fingerprint(Path::new(path), *size as u64)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "!missing".to_string());
+                if let Ok(ctx) = st.lock() {
+                    if let Ok(lib) = library(&ctx) {
+                        let _ = db::set_fingerprint(&lib.conn, *id, &fp);
+                    }
+                }
+            }
+            if let Ok(ctx) = st.lock() {
+                if let Ok(lib) = library(&ctx) {
+                    if let Ok((done, total)) = db::fingerprint_progress(&lib.conn) {
+                        if let Ok(mut p) = ctx.dedupe_progress.lock() {
+                            *p = (done, total);
+                        }
+                    }
+                }
+            }
+            let _ = app.emit("dedupe-progress", serde_json::json!({ "event": "tick" }));
+        }
+        if let Ok(ctx) = st.lock() {
+            ctx.dedupe_running.store(false, Ordering::SeqCst);
+        }
+        let _ = app.emit("dedupe-progress", serde_json::json!({ "event": "done" }));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn dedupe_status(state: State<'_, AppState>) -> Result<crate::models::FingerprintProgress, String> {
+    let ctx = state.lock()?;
+    let running = ctx.dedupe_running.load(Ordering::SeqCst);
+    let cached = ctx.dedupe_progress.lock().map(|p| *p).unwrap_or((0, 0));
+    // 任务没在跑时直接读库，保证数字是当前真实的
+    let (done, total) = if running {
+        cached
+    } else {
+        let lib = library(&ctx)?;
+        db::fingerprint_progress(&lib.conn).unwrap_or(cached)
+    };
+    Ok(crate::models::FingerprintProgress { done, total, running })
+}
+
+#[tauri::command]
+fn dedupe_groups(state: State<'_, AppState>) -> Result<Vec<crate::models::DuplicateGroup>, String> {
+    let ctx = state.lock()?;
+    db::duplicate_groups(&library(&ctx)?.conn)
+}
+
+/// 把重复副本送进回收站（不删文件）。keep 为空时按每组第一条建议保留。
+#[tauri::command]
+fn dedupe_apply(state: State<'_, AppState>) -> Result<usize, String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    let groups = db::duplicate_groups(&lib.conn)?;
+    let mut total = 0usize;
+    for g in groups {
+        let drops: Vec<i64> = g.others.iter().map(|i| i.id).collect();
+        total += db::mark_duplicates(&lib.conn, g.keep.id, &drops)?;
+    }
+    Ok(total)
+}
+
+/// 按前端传来的选择精确处理：{ keep_id: [drop_id...] }
+#[tauri::command]
+fn dedupe_apply_selected(
+    state: State<'_, AppState>,
+    pairs: Vec<(i64, Vec<i64>)>,
+) -> Result<usize, String> {
+    let ctx = state.lock()?;
+    let lib = library(&ctx)?;
+    let mut total = 0usize;
+    for (keep, drops) in pairs {
+        total += db::mark_duplicates(&lib.conn, keep, &drops)?;
+    }
+    Ok(total)
+}
+
+/// 清掉回收站里文件已经不在的幽灵行
+#[tauri::command]
+fn purge_missing_trashed(state: State<'_, AppState>) -> Result<usize, String> {
+    let ctx = state.lock()?;
+    db::purge_missing_trashed(&library(&ctx)?.conn)
+}
+
 
 #[tauri::command]
 fn player_engines(state: State<'_, AppState>) -> Result<Vec<mpv::EngineInfo>, String> {
@@ -1737,6 +1863,12 @@ pub fn run() {
             get_boss_recall,
             set_boss_recall,
             compress_videos,
+            dedupe_scan,
+            dedupe_status,
+            dedupe_groups,
+            dedupe_apply,
+            dedupe_apply_selected,
+            purge_missing_trashed,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");
