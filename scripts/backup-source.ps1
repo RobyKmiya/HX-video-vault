@@ -5,8 +5,11 @@
 # 那块盘是唯一存放地。这个脚本把源码 + .git 历史复制到 D 盘，留最近 N 份。
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File E:\VideoVault\scripts\backup-source.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\VideoVault\scripts\backup-source.ps1
 #   加 -Quiet 只在失败时输出
+#
+# 源目录 2026-11-27 03:30 修正为 D:\VideoVault（原先写死 E:\VideoVault，E 盘源码清空后
+# 每日 03:00 的自动化会静默失败、备份断流 —— 踩过一次）。
 #
 # 排除项说明：
 #   src-tauri\target  编译产物，31.7GB，千万别备份
@@ -15,7 +18,7 @@
 #   .vault            测试库，不是源码
 
 param(
-    [string]$Source = 'E:\VideoVault',
+    [string]$Source = 'D:\VideoVault',
     [string]$DestRoot = 'D:\VideoVault-backups',
     [int]$Keep = 5,
     [switch]$Quiet,
