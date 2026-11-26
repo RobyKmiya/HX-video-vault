@@ -19,7 +19,7 @@
 59 个副本进回收站，剩余重复组 0）。
 
 **没有半截功能。** 剩下的全是"需要人工点一遍"的实机验收项，和几件明确排期外的事（接触表补满、mpv 联调、hanime 插件）。
-2026-11-27 03:58 起 `lib.rs` 已从 1893 行拆到 383 行：81 个命令按领域搬到 `src-tauri/src/commands/` 下 12 个子模块，纯结构重构未发版，exe 仍是 0.1.27。
+2026-11-27 03:58 起 `lib.rs` 已从 1893 行拆到 383 行：81 个命令按领域搬到 `src-tauri/src/commands/` 下 12 个子模块；04:30 起 `db.rs` 从 2876 行拆到 272 行：共享类型/helper 留原处，54 个业务函数 + 19 个测试搬到 `src-tauri/src/db/` 下 10 个子模块，`crate::db::xxx` 调用路径不变。两批都是纯结构重构未发版，exe 仍是 0.1.27。
 
 **当前唯一源码 = `D:\VideoVault`**（内置盘）。E 盘源码副本已于 11-27 03:15 全部清空 —— E 盘是外置 USB NVMe，
 出过两次 `ERROR_DEVICE_HARDWARE_ERROR(483)`，查明是线材/接触不良，但结论仍是：外置盘只放素材，不放唯一副本。
@@ -62,7 +62,7 @@
 
 | 模块 | 行数 | 职责 |
 |---|---|---|
-| `db.rs` | 2876 | 库的打开/迁移/查询。`SCHEMA_VERSION = 7`，`open_library(root)` 是唯一入口；`migrate()` 按 `PRAGMA user_version` 逐版升级；`normalize_and_dedupe_videos()` 做路径规范化与重复登记合并 |
+| `db.rs` | 272 | 只留 `SCHEMA_VERSION=7` / `VideoRecord` / `LibraryContext` / `VideoStamp` / 共享 helper（`now_secs` `map_video` `escape_like` `rel_dir_of` 家族等）+ `pub(crate) use` re-export。**业务函数已拆到 `src-tauri/src/db/` 下 9 个领域子模块**（schema / dedupe / videos / covers / tags / collections / folder / stats / downloads）+ `tests.rs`，`crate::db::xxx` 路径不变。`schema.rs` 含 `open_library(root)` 唯一入口、`migrate()` 逐版升级、`normalize_and_dedupe_videos()` 路径规范化与重复登记合并 |
 | `lib.rs` | 383 | 只留 `Settings` / `AppInner` / `AppState`（`Arc<Mutex<AppInner>>`）+ settings 读写 + `library()` 辅助 + 单实例守卫 + `run()` 注册。**命令已拆到 `src-tauri/src/commands/` 下 12 个领域子模块**（settings / browse / collections / player / sheets / dedupe / downloads / editing / covers / imports / files / window），`mod.rs` 是共用导入 prelude；约 80 个命令，见下方分组 |
 | `edit.rs` | 925 | 剪辑：裁剪/拼接/压缩，ffmpeg 前端最小封装。任务全程不持 AppState 锁 |
 | `media.rs` | 659 | 探测/缩略图/指纹。`probe()` ffprobe 元数据；`contact_sheet()` 接触表（**要线性解码整片，实测 18 秒/条**）；`fingerprint()` = blake3(大小 + 首 8 MB + 尾 8 MB)，**不含 mtime**，为的是识别跨盘改名副本 |
