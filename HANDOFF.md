@@ -19,7 +19,7 @@
 59 个副本进回收站，剩余重复组 0）。
 
 **没有半截功能。** 剩下的全是"需要人工点一遍"的实机验收项，和几件明确排期外的事（接触表补满、mpv 联调、hanime 插件）。
-2026-11-27 03:58 起 `lib.rs` 已从 1893 行拆到 383 行：81 个命令按领域搬到 `src-tauri/src/commands/` 下 12 个子模块；04:30 起 `db.rs` 从 2876 行拆到 272 行：共享类型/helper 留原处，54 个业务函数 + 19 个测试搬到 `src-tauri/src/db/` 下 10 个子模块，`crate::db::xxx` 调用路径不变。两批都是纯结构重构未发版，exe 仍是 0.1.27。
+2026-11-27 03:58 起 `lib.rs` 已从 1893 行拆到 383 行：81 个命令按领域搬到 `src-tauri/src/commands/` 下 12 个子模块；04:30 起 `db.rs` 从 2876 行拆到 272 行：共享类型/helper 留原处，54 个业务函数 + 19 个测试搬到 `src-tauri/src/db/` 下 10 个子模块，`crate::db::xxx` 调用路径不变。04:40 起 `App.tsx` 从 1951 行拆到 1446 行：5 个独立子组件（BootSplash/ImportHud/SettingsModal/SheetPanel/CollectionManager）搬到 `src/components/`，正文逐字节一致。三批都是纯结构重构未发版，exe 仍是 0.1.27。
 
 **当前唯一源码 = `D:\VideoVault`**（内置盘）。E 盘源码副本已于 11-27 03:15 全部清空 —— E 盘是外置 USB NVMe，
 出过两次 `ERROR_DEVICE_HARDWARE_ERROR(483)`，查明是线材/接触不良，但结论仍是：外置盘只放素材，不放唯一副本。
@@ -91,7 +91,7 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `App.tsx` | 1951 | 视图状态机 + 侧栏 + 网格 + 工具栏。**28 个 useEffect，是全仓最挤的文件，动之前先看清依赖** |
+| `App.tsx` | 1446 | 视图状态机 + 侧栏 + 网格 + 工具栏。**28 个 useEffect，仍是全仓最挤的文件，动之前先看清依赖**。5 个独立子组件已拆到 `src/components/`（BootSplash / ImportHud / SettingsModal / SheetPanel / CollectionManager），改弹窗别再翻 App.tsx |
 | `components/Player.tsx` | 798 | 播放页。mpv 独立窗口 + 内嵌详情面板三态（384 常驻 / 780 加宽 / 58 折叠） |
 | `components/DetailDrawer.tsx` | 548 | 详情抽屉。内联重命名、标签、封面、移动 |
 | `types.ts` | 323 | 前后端共享类型 |
