@@ -1,4 +1,4 @@
-# 影匣源码异地备份
+﻿# 影匣源码异地备份
 #
 # 背景：2026-11-26 E 盘（USB 外置 NVMe）出现过 ERROR_DEVICE_HARDWARE_ERROR(483)
 # 设备层断连，E:\VideoVault 整目录读不出来。影匣源码没有远程仓库、没有其他副本，
