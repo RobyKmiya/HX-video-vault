@@ -7,3 +7,6 @@ target/
 .DS_Store
 *.log
 .vite/
+
+# WE 导出助手的本机配置（Steam 路径 / 库路径，每台机器不同），不进版本库
+tools/we-export/config.json
