@@ -12,7 +12,7 @@
  *   node scripts/release.mjs --reopen       # 装机后自动拉起（默认不拉起，留手动检查）
  *
  * 与画匣 release.mjs 完全隔离：
- *   - 只操作本仓库 E:\VideoVault 与安装目录 %LOCALAPPDATA%\影匣；
+ *   - 只操作本仓库 D:\VideoVault 与安装目录 %LOCALAPPDATA%\影匣；
  *   - 不读取、不修改画匣库（F:\Hthings\BENZI）与画匣进程 archive-gallery.exe；
  *   - 影匣的 exe 名是 video-vault.exe，进程名与画匣不同。
  *
