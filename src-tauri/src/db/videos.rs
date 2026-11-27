@@ -62,7 +62,10 @@ pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String
         }
         None => {
             conn.execute(
-                "INSERT INTO videos (path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                // import_seq 是「第几个被收进影匣的视频」：取当前最大值 +1，删掉的号不复用、也不回填空洞，
+                // 这样它永远只增不改，能当导入顺序的身份证用。
+                "INSERT INTO videos (path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, import_seq)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13, (SELECT COALESCE(MAX(import_seq),0)+1 FROM videos))",
                 params![rec.path, rec.file_name, rec.container, rec.size_bytes, rec.mtime, rec.duration_sec, rec.width, rec.height, rec.codec_video, rec.codec_audio, rec.entry_index, rec.entry_count, now_secs()],
             ).map_err(|e| e.to_string())?;
             Ok(true)

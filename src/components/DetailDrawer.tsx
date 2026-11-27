@@ -517,7 +517,13 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
             <div><dt>上次观看</dt><dd>{relativeTime(video.last_watched_at)}</dd></div>
             <div><dt>加入时间</dt><dd>{formatDate(video.added_at)}</dd></div>
             <div><dt>导入计数</dt><dd>{video.import_seq > 0 ? `第 ${video.import_seq.toLocaleString()} 个导入` : "—"}</dd></div>
-            <div><dt>位置计数</dt><dd>{video.folder_no > 0 ? `第 ${video.folder_no} 号夹 · 第 ${video.slot_no} 条` : "—"}</dd></div>
+            <div><dt>位置计数</dt><dd>{video.folder_no > 0 ? `第 ${video.folder_no} 号夹 · 第 ${video.slot_no} 条（全局第 ${(video.folder_no - 1) * 200 + video.slot_no} 位）` : "—"}</dd></div>
+            <div><dt>导入/位置差</dt><dd>{(() => {
+              if (video.import_seq <= 0 || video.folder_no <= 0) return "—";
+              const diff = video.import_seq - ((video.folder_no - 1) * 200 + video.slot_no);
+              if (diff === 0) return "与导入顺序一致";
+              return diff > 0 ? `前面少了 ${diff} 条（回收站/已删）` : `前面多了 ${-diff} 条（新插入/重排）`;
+            })()}</dd></div>
             {video.entry_index > 0 && <div><dt>压缩包内</dt><dd>第 {video.entry_index + 1} / {video.entry_count} 个</dd></div>}
           </dl>
         </div>

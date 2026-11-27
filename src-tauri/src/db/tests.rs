@@ -963,3 +963,27 @@ fn organize_moves_into_numbered_folders_and_updates_db() {
     drop(ctx);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn new_videos_get_monotonic_import_seq_without_reuse() {
+    let (root, ctx) = temp_lib();
+    upsert_video(&ctx.conn, &rec("D:////n1.mp4", 0)).unwrap();
+    upsert_video(&ctx.conn, &rec("D:////n2.mp4", 0)).unwrap();
+    let seq = |path: &str| -> i64 {
+        ctx.conn
+            .query_row("SELECT import_seq FROM videos WHERE path=?1", params![path], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(seq("D:////n1.mp4"), 1);
+    assert_eq!(seq("D:////n2.mp4"), 2);
+    // 删掉第一条，再导入：新号必须是 3，不能复用 1
+    let id: i64 = ctx
+        .conn
+        .query_row("SELECT id FROM videos WHERE path=?1", params!["D:////n1.mp4"], |r| r.get(0))
+        .unwrap();
+    delete_video_row(&ctx.conn, id).unwrap();
+    upsert_video(&ctx.conn, &rec("D:////n3.mp4", 0)).unwrap();
+    assert_eq!(seq("D:////n3.mp4"), 3, "导入计数只增不复用");
+    drop(ctx);
+    let _ = fs::remove_dir_all(root);
+}

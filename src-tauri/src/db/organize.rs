@@ -160,6 +160,27 @@ pub fn organize_numbered(lib: &LibraryContext, cap: usize) -> Result<OrganizeRep
         }
     }
 
+    // 历史 0 值补号（0.1.30 前 upsert 没写 import_seq 的漏网行）：按 id 顺序接在最大值后面
+    let mut next: i64 = lib
+        .conn
+        .query_row("SELECT COALESCE(MAX(import_seq),0) FROM videos", [], |r| r.get(0))
+        .unwrap_or(0);
+    if let Ok(mut stmt) = lib
+        .conn
+        .prepare("SELECT id FROM videos WHERE import_seq=0 ORDER BY id ASC")
+    {
+        let ids: Vec<i64> = stmt
+            .query_map([], |r| r.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        for id in ids {
+            next += 1;
+            let _ = lib
+                .conn
+                .execute("UPDATE videos SET import_seq=?2 WHERE id=?1", params![id, next]);
+        }
+    }
+
     // 有跳过/重名时编号会漂：最后按「磁盘上的实际夹」重算一遍位置计数，保证唯一且对得上
     backfill_positions(&lib.conn)?;
 
