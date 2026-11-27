@@ -250,23 +250,23 @@ pub(crate) fn map_download(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
 
 // ── 领域子模块：全部 pub 函数 re-export 回 crate::db::xxx，外部调用路径不变 ──
 pub(crate) mod schema;
-pub(crate) use schema::*;
+pub use schema::*;
 pub(crate) mod dedupe;
-pub(crate) use dedupe::*;
+pub use dedupe::*;
 pub(crate) mod videos;
-pub(crate) use videos::*;
+pub use videos::*;
 pub(crate) mod covers;
-pub(crate) use covers::*;
+pub use covers::*;
 pub(crate) mod tags;
-pub(crate) use tags::*;
+pub use tags::*;
 pub(crate) mod collections;
-pub(crate) use collections::*;
+pub use collections::*;
 pub(crate) mod folder;
-pub(crate) use folder::*;
+pub use folder::*;
 pub(crate) mod stats;
-pub(crate) use stats::*;
+pub use stats::*;
 pub(crate) mod downloads;
-pub(crate) use downloads::*;
+pub use downloads::*;
 
 #[cfg(test)]
 mod tests;

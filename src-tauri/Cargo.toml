@@ -1,6 +1,6 @@
 [package]
 name = "video-vault"
-version = "0.1.27"
+version = "0.1.28"
 description = "影匣 — 本地离线视频库与播放器"
 authors = ["Video Vault"]
 edition = "2024"
