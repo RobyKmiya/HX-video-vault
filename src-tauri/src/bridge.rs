@@ -71,6 +71,22 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
                 Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
             }
         }
+        // 页面元数据（标题/作者/标签）：服务端抓，绕开浏览器 DOM 差异
+        ("GET", "/meta") => {
+            let url = query_param(&path, "url").unwrap_or_default();
+            match crate::downloader::page_meta(&url) {
+                Ok((title, author, tags)) => (
+                    200,
+                    format!(
+                        r#"{{"ok":true,"title":{},"author":{},"tags":[{}]}}"#,
+                        json_str(&title),
+                        json_str(&author),
+                        tags.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(",")
+                    ),
+                ),
+                Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
+            }
+        }
         ("GET", "/stats") => match crate::with_library(state, |lib| {
             let total: i64 = lib
                 .conn
@@ -89,49 +105,34 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
             ),
             Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
         },
-        // 让影匣去下载：脚本只给作品页，解析与落盘都在影匣里做（curl 能带 Referer）
+        // 让影匣去下载：脚本只给作品页，解析与入队都在后台线程做，避免脚本等超时
         ("POST", "/download") => {
             match serde_json::from_slice::<serde_json::Value>(&body) {
                 Ok(v) => {
                     let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let want_title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
                     let tags = v.get("tags").and_then(|x| x.as_str()).unwrap_or("").to_string();
                     if url.is_empty() {
                         (400, r#"{"ok":false,"error":"url 不能为空"}"#.into())
                     } else {
-                        match crate::downloader::resolve(&url) {
-                            Ok(rep) => {
-                                match rep.candidates.iter().find(|c| c.kind == "video") {
-                                    Some(best) => {
-                                        let title = if want_title.is_empty() { rep.title.clone() } else { want_title };
-                                        let site = rep.site.clone();
-                                        let best_url = best.url.clone();
-                                        let best_name = best.name.clone();
-                                        let t2 = title.clone();
-                                        let queued = crate::with_library(state, |lib| {
-                                            crate::db::create_download(&lib.conn, &best_url, &t2, &site, "", &tags)
-                                        });
-                                        match queued {
-                                            Ok(id) => {
-                                                if let (Some(app), Ok(root)) = (APP.get(), state.library_path()) {
-                                                    crate::downloader::run_queue(app.clone(), root, 50);
-                                                }
-                                                (200, format!(
-                                                    r#"{{"ok":true,"id":{},"title":{},"file":{}}}"#,
-                                                    id, json_str(&title), json_str(&best_name)
-                                                ))
-                                            }
-                                            Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
+                        let st = state.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(rep) = crate::downloader::resolve(&url) {
+                                if let Some(best) = rep.candidates.iter().find(|c| c.kind == "video") {
+                                    let t = if title.is_empty() { rep.title.clone() } else { title };
+                                    let best_url = best.url.clone();
+                                    let queued = crate::with_library(&st, |lib| {
+                                        crate::db::create_download(&lib.conn, &best_url, &t, &rep.site, "", &tags)
+                                    });
+                                    if queued.is_ok() {
+                                        if let (Some(app), Ok(root)) = (APP.get(), st.library_path()) {
+                                            crate::downloader::run_queue(app.clone(), root, 50);
                                         }
                                     }
-                                    None => (200, format!(
-                                        r#"{{"ok":false,"error":"没找到可下载的视频直链","note":{}}}"#,
-                                        json_str(&rep.note)
-                                    )),
                                 }
                             }
-                            Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
-                        }
+                        });
+                        (200, r#"{"ok":true,"queued":true,"note":"影匣正在后台解析并下载"}"#.into())
                     }
                 }
                 Err(e) => (400, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e.to_string()))),

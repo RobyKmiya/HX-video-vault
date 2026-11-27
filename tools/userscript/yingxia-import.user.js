@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         影匣 · 网页视频入库
 // @namespace    video-vault.local
-// @version      0.1.0
+// @version      0.1.1
 // @description  在任意带视频的网页上抓标题/作者/出处，记进影匣并可直接下载；标签、备注、防重复与本地库互通
 // @author       workbuddy
 // @match        *://*/*
@@ -102,14 +102,14 @@
   }
 
   // ── 与影匣本地桥通信 ────────────────────────────────────
-  function api(method, path, body) {
+  function api(method, path, body, timeoutMs) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method,
         url: cfg().bridge.replace(/\/$/, "") + path,
         headers: body ? { "Content-Type": "application/json" } : undefined,
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 6000,
+        timeout: timeoutMs || 8000,
         onload: (r) => {
           try { resolve(JSON.parse(r.responseText || "{}")); }
           catch (e) { reject(new Error("桥返回了非 JSON：" + r.responseText?.slice(0, 80))); }
@@ -209,6 +209,21 @@
     }
   }
 
+  /** 服务端抓标题/作者/标签：比 DOM 选择器稳，站点改版也不怕 */
+  async function fillFromServer() {
+    const q = (r) => panel.querySelector(`[data-role="${r}"]`);
+    try {
+      const r = await api("GET", "/meta?url=" + encodeURIComponent(location.href), null, 40000);
+      if (!r.ok) return;
+      if (r.title && !q("title").value.trim()) q("title").value = r.title;
+      if (r.author && !q("author").value.trim()) q("author").value = r.author;
+      if (Array.isArray(r.tags) && r.tags.length && !q("tags").value.trim()) {
+        q("tags").value = r.tags.join(", ");
+      }
+      if (Array.isArray(r.tags) && r.tags.length) setTip(`已从页面抓到 ${r.tags.length} 个标签`, "ok");
+    } catch (_) { /* 抓不到就用手填，不打扰 */ }
+  }
+
   async function refreshCheck(loud) {
     const url = location.href;
     try {
@@ -266,13 +281,13 @@
       if (!id) { setTip("这个页面没有作品号（不是 /watch?v= 页）", "bad"); return; }
       setTip("正在让影匣解析最高画质…");
       try {
-        await api("POST", "/hook", payload());     // 元数据先记下，下载完成后自动挂上
+        await api("POST", "/hook", payload(), 15000);     // 元数据先记下，下载完成后自动挂上
         const r = await api("POST", "/download", {
           url: location.href, title: payload().title, tags: payload().tags,
-        });
-        if (!r.ok) throw new Error(r.error || "影匣没能解析出直链");
-        setTip(`已交给影匣下载：${r.file}。下完会自动入库并挂标签`, "ok");
-        setStatus("影匣下载中", "ok");
+        }, 45000);
+        if (!r.ok) throw new Error(r.error || "影匣没能接单");
+        setTip("已交给影匣：后台解析最高画质并下载，进度在影匣「下载」面板看；下完自动入库并挂标签", "ok");
+        setStatus("影匣后台下载中", "ok");
       } catch (e) {
         setTip(String(e.message || e) + "（也可以点下面的「打下载页」手动挑画质）", "bad");
       }
@@ -310,7 +325,11 @@
     btn.title = "影匣 · 网页视频入库";
     btn.onclick = () => {
       panel.classList.toggle("open");
-      if (panel.classList.contains("open")) { fillFields(); void ping().then(() => refreshCheck(false)); }
+      if (panel.classList.contains("open")) {
+        fillFields();
+        void ping().then(() => refreshCheck(false));
+        void fillFromServer();
+      }
     };
     document.documentElement.appendChild(btn);
   }

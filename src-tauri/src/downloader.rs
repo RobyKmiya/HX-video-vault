@@ -140,30 +140,46 @@ pub fn resolve(url: &str) -> Result<ResolveReport, String> {
     Ok(ResolveReport { site: site_of(url), title, candidates, note })
 }
 
+/// 只抓页面元数据（标题/作者/标签），不下下载页——给浏览器脚本填表用。
+/// 非 hanime 站点只回标题，避免假装支持所有站。
+pub fn page_meta(url: &str) -> Result<(String, String, Vec<String>), String> {
+    if !site_of(url).ends_with("hanime1.me") {
+        let html = fetch_html(url)?;
+        let re = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").map_err(|e| e.to_string())?;
+        let title = re
+            .captures(&html)
+            .map(|c| c[1].trim().to_string())
+            .unwrap_or_default();
+        return Ok((title, String::new(), Vec::new()));
+    }
+    let (title, author, tags) = hanime_meta(url)?;
+    Ok((title, author, tags))
+}
+
 /// hanime1.me：作品页 → 下载页取各画质 mp4，顺带把标题/作者/标签带出来。
 ///
 /// 站点结构（2026-11 实测）：`/watch?v=<id>` 是播放页，`/download?v=<id>` 是画质列表，
 /// 里面是直链 mp4（CDN 校验 Referer）；作者/标签都是 `/search?query=...&type=uploader|genre` 链接。
-fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
-    let id_re = Regex::new(r"[?&]v=(\d+)").map_err(|e| e.to_string())?;
-    let id = id_re
-        .captures(url)
-        .map(|c| c[1].to_string())
-        .ok_or("链接里没有 v= 作品号")?;
-    let referer = "https://hanime1.me/";
-    let watch_url = format!("https://hanime1.me/watch?v={id}");
-    let dl_url = format!("https://hanime1.me/download?v={id}");
+fn hanime_id(url: &str) -> Option<String> {
+    let re = Regex::new(r"[?&]v=(\d+)").ok()?;
+    re.captures(url).map(|c| c[1].to_string())
+}
 
-    let watch_html = fetch_html_with(&watch_url, Some(referer)).unwrap_or_default();
-    let dl_html = fetch_html_with(&dl_url, Some(&watch_url))?;
+/// 作品页 → (标题, 作者, 标签)。标签靠 `type=genre` 链接，作者靠 `type=uploader`。
+fn hanime_meta(url: &str) -> Result<(String, String, Vec<String>), String> {
+    let id = hanime_id(url).ok_or("链接里没有 v= 作品号")?;
+    let watch = format!("https://hanime1.me/watch?v={id}");
+    let html = fetch_html_with(&watch, Some("https://hanime1.me/"))?;
+    Ok(parse_hanime_watch(&html))
+}
 
-    // 标题：og:title 优先，其次 <title>，去掉站点尾巴
+fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
     let og = Regex::new(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#).ok();
     let title_tag = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok();
     let mut title = og
-        .and_then(|r| r.captures(&watch_html))
+        .and_then(|r| r.captures(html))
         .map(|c| c[1].to_string())
-        .or_else(|| title_tag.and_then(|r| r.captures(&watch_html)).map(|c| c[1].to_string()))
+        .or_else(|| title_tag.and_then(|r| r.captures(html)).map(|c| c[1].to_string()))
         .unwrap_or_default();
     title = title
         .replace("&amp;", "&")
@@ -175,22 +191,30 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
         .trim()
         .to_string();
 
-    // 作者 / 标签：从 search 链接里取
     let mut author = String::new();
     if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=uploader"#) {
-        if let Some(c) = re.captures(&watch_html) {
+        if let Some(c) = re.captures(html) {
             author = percent_decode_str(&c[1]);
         }
     }
     let mut tags: Vec<String> = Vec::new();
     if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=genre"#) {
-        for c in re.captures_iter(&watch_html) {
+        for c in re.captures_iter(html) {
             let t = percent_decode_str(&c[1]);
             if !t.is_empty() && !tags.contains(&t) {
                 tags.push(t);
             }
         }
     }
+    (title, author, tags)
+}
+
+fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
+    let id = hanime_id(url).ok_or("链接里没有 v= 作品号")?;
+    let watch_url = format!("https://hanime1.me/watch?v={id}");
+    let dl_url = format!("https://hanime1.me/download?v={id}");
+    let (title, author, tags) = hanime_meta(url).unwrap_or_else(|_| (String::new(), String::new(), Vec::new()));
+    let dl_html = fetch_html_with(&dl_url, Some(&watch_url))?;
 
     // 画质候选：下载页里的 mp4 直链，1080 排前
     let link_re = Regex::new(
@@ -205,7 +229,7 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
         }
     }
     if urls.is_empty() {
-        // 兜底：播放页里的 m3u8 / mp4
+        let watch_html = fetch_html_with(&watch_url, Some("https://hanime1.me/")).unwrap_or_default();
         for c in extract_candidates(&watch_html, &watch_url) {
             if c.kind == "video" && !urls.contains(&c.url) {
                 urls.push(c.url);
@@ -218,7 +242,6 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
     };
     urls.sort_by_key(rank);
 
-    // 落盘名用作品标题（去掉非法字符）：文件名就是标题，入库后按标题匹配元数据才不会错位
     let file_base: String = title
         .chars()
         .map(|c| if "<>:/\\|?*\"".contains(c) { '_' } else { c })
@@ -228,12 +251,7 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
     let file_base = if file_base.is_empty() { format!("hanime-{id}") } else { file_base };
     let candidates: Vec<MediaCandidate> = urls
         .into_iter()
-        .enumerate()
-        .map(|(_i, url)| MediaCandidate {
-            url,
-            name: format!("{file_base}.mp4"),
-            kind: "video".into(),
-        })
+        .map(|url| MediaCandidate { url, name: format!("{file_base}.mp4"), kind: "video".into() })
         .collect();
 
     let mut note = format!("hanime1 · 作品 {id} · 找到 {} 个画质", candidates.len());
@@ -243,7 +261,6 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
     if !tags.is_empty() {
         note.push_str(&format!(" · 标签：{}", tags.join("、")));
     }
-
     Ok(ResolveReport { site: "hanime1.me".into(), title, candidates, note })
 }
 

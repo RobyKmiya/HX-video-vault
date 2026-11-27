@@ -387,12 +387,15 @@ export default function App() {
 
   useEffect(() => {
     if (!ready || !info) return;
+    // 换排序/筛选后回到顶部：否则窗口化列表还停在原来的滚动位置，看起来像没生效
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+    setSelected(new Set());
     void loadVideos(true);
     void refreshMeta()
       .catch(() => {})
       .finally(() => setBootMetaDone(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, info, view, debouncedSearch, activeTag, activeCollection, sort]);
+  }, [ready, info, view, debouncedSearch, activeTag, activeCollection, sort, sortRev]);
 
   useEffect(() => {
     reloadRef.current = () => void loadVideos(true);
