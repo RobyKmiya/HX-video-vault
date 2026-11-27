@@ -30,9 +30,33 @@
     txt($(`meta[property="${name}"]`)?.content || $(`meta[name="${name}"]`)?.content || "");
 
   const host = location.hostname.replace(/^www\./, "");
+  const isHanime = /(^|\.)hanime1\.me$/.test(host);
+
+  /** hanime1 作品页的作品号（/watch?v=123） */
+  function hanimeId() {
+    const m = location.search.match(/[?&]v=(\d+)/);
+    return m ? m[1] : "";
+  }
+  /** hanime1 的作者与标签都挂在 /search?query=...&type=uploader|genre 链接上 */
+  function hanimeAuthor() {
+    const a = document.querySelector('a[href*="type=uploader"]');
+    return txt(a?.textContent);
+  }
+  function hanimeTags() {
+    const out = new Set();
+    document.querySelectorAll('a[href*="type=genre"]').forEach((a) => {
+      const t = txt(a.textContent);
+      if (t && t.length <= 20) out.add(t);
+    });
+    return [...out];
+  }
 
   /** 作者/上传者：优先站点特征，其次 meta，最后页面标题里的「- xxx」尾巴 */
   function guessAuthor() {
+    if (isHanime) {
+      const a = hanimeAuthor();
+      if (a) return a;
+    }
     const selectors = [
       "#channel-name a", "ytd-channel-name a",                     // YouTube
       ".up-name", ".username", ".author a", "[itemprop=author] a",  // B 站/通用
@@ -123,6 +147,7 @@
         <button class="vv-btn primary" data-role="save">记入影匣</button>
         <button class="vv-btn" data-role="download">下载视频</button>
         <button class="vv-btn" data-role="check">查重</button>
+        <button class="vv-btn" data-role="dlpage" style="display:none">下载页</button>
       </div>
       <div class="vv-tip" data-role="tip"></div>
       <div class="vv-foot"><a data-role="settings">桥地址</a><span data-role="ver"></span></div>
@@ -134,6 +159,11 @@
     q("save").onclick = onSave;
     q("download").onclick = onDownload;
     q("check").onclick = () => refreshCheck(true);
+    q("dlpage").onclick = () => {
+      const id = hanimeId();
+      if (id) window.open(`https://hanime1.me/download?v=${id}`, "_blank");
+    };
+    if (isHanime) q("dlpage").style.display = "";
     q("settings").onclick = () => {
       const v = prompt("影匣本地桥地址（默认 http://127.0.0.1:17890）", cfg().bridge);
       if (v) { saveCfg({ bridge: v.trim() }); ping(); }
@@ -147,6 +177,7 @@
     const q = (r) => panel.querySelector(`[data-role="${r}"]`);
     q("title").value = q("title").value || guessTitle();
     q("author").value = q("author").value || guessAuthor();
+    if (isHanime && !q("tags").value) q("tags").value = hanimeTags().join(", ");
     q("src").textContent = location.href;
     q("src").title = location.href;
   }
@@ -229,6 +260,24 @@
   }
 
   async function onDownload() {
+    // hanime1：页面里是播放器，直链要带 Referer，交给影匣下载器最稳
+    if (isHanime) {
+      const id = hanimeId();
+      if (!id) { setTip("这个页面没有作品号（不是 /watch?v= 页）", "bad"); return; }
+      setTip("正在让影匣解析最高画质…");
+      try {
+        await api("POST", "/hook", payload());     // 元数据先记下，下载完成后自动挂上
+        const r = await api("POST", "/download", {
+          url: location.href, title: payload().title, tags: payload().tags,
+        });
+        if (!r.ok) throw new Error(r.error || "影匣没能解析出直链");
+        setTip(`已交给影匣下载：${r.file}。下完会自动入库并挂标签`, "ok");
+        setStatus("影匣下载中", "ok");
+      } catch (e) {
+        setTip(String(e.message || e) + "（也可以点下面的「打下载页」手动挑画质）", "bad");
+      }
+      return;
+    }
     const src = guessVideoUrl();
     if (!src) { setTip("这个页面没找到直链视频（可能是 iframe 内播放器）", "bad"); return; }
     if (src.startsWith("blob:")) {

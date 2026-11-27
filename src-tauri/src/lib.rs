@@ -296,7 +296,7 @@ pub fn run() {
             app.manage(state);
             // 浏览器油猴脚本用的本地桥（只监听 127.0.0.1，端口占用就静默放弃）
             if let Some(st) = app.try_state::<AppState>() {
-                crate::bridge::spawn(st.inner().clone());
+                crate::bridge::spawn(app.handle().clone(), st.inner().clone());
             }
             // 启动后后台整理一次：浏览器常把新视频直接下到库根/老夹里，收进编号夹再浏览不容易卡。
             // 先做便宜判断，没东西可整就完全不碰库。

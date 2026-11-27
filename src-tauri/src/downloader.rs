@@ -44,9 +44,18 @@ fn site_of(url: &str) -> String {
 
 /// 抓页面 HTML。只用于解析直链，绝不上传本地库内容。
 fn fetch_html(url: &str) -> Result<String, String> {
+    fetch_html_with(url, None)
+}
+
+/// 带 Referer 的版本：hanime 一类站点对下载页/媒体文件都要校验来路。
+fn fetch_html_with(url: &str, referer: Option<&str>) -> Result<String, String> {
     let curl = find_curl().ok_or("未找到 curl，无法访问链接")?;
-    let out = crate::proc::quiet(curl)
-        .args(["-sSL", "--max-time", "20", "-A", UA])
+    let mut cmd = crate::proc::quiet(curl);
+    cmd.args(["-sSL", "--max-time", "25", "-A", UA]);
+    if let Some(r) = referer {
+        cmd.args(["-e", r]);
+    }
+    let out = cmd
         .arg(url)
         .output()
         .map_err(|e| format!("请求失败: {e}"))?;
@@ -113,6 +122,9 @@ pub fn resolve(url: &str) -> Result<ResolveReport, String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("只支持 http/https 链接".into());
     }
+    if site_of(url).ends_with("hanime1.me") {
+        return resolve_hanime(url);
+    }
     let html = fetch_html(url)?;
     let candidates = extract_candidates(&html, url);
     let title_re = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok();
@@ -128,12 +140,138 @@ pub fn resolve(url: &str) -> Result<ResolveReport, String> {
     Ok(ResolveReport { site: site_of(url), title, candidates, note })
 }
 
+/// hanime1.me：作品页 → 下载页取各画质 mp4，顺带把标题/作者/标签带出来。
+///
+/// 站点结构（2026-11 实测）：`/watch?v=<id>` 是播放页，`/download?v=<id>` 是画质列表，
+/// 里面是直链 mp4（CDN 校验 Referer）；作者/标签都是 `/search?query=...&type=uploader|genre` 链接。
+fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
+    let id_re = Regex::new(r"[?&]v=(\d+)").map_err(|e| e.to_string())?;
+    let id = id_re
+        .captures(url)
+        .map(|c| c[1].to_string())
+        .ok_or("链接里没有 v= 作品号")?;
+    let referer = "https://hanime1.me/";
+    let watch_url = format!("https://hanime1.me/watch?v={id}");
+    let dl_url = format!("https://hanime1.me/download?v={id}");
+
+    let watch_html = fetch_html_with(&watch_url, Some(referer)).unwrap_or_default();
+    let dl_html = fetch_html_with(&dl_url, Some(&watch_url))?;
+
+    // 标题：og:title 优先，其次 <title>，去掉站点尾巴
+    let og = Regex::new(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#).ok();
+    let title_tag = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok();
+    let mut title = og
+        .and_then(|r| r.captures(&watch_html))
+        .map(|c| c[1].to_string())
+        .or_else(|| title_tag.and_then(|r| r.captures(&watch_html)).map(|c| c[1].to_string()))
+        .unwrap_or_default();
+    title = title
+        .replace("&amp;", "&")
+        .split(['|', '–'])
+        .next()
+        .unwrap_or(&title)
+        .trim()
+        .trim_end_matches("- Hanime1.me")
+        .trim()
+        .to_string();
+
+    // 作者 / 标签：从 search 链接里取
+    let mut author = String::new();
+    if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=uploader"#) {
+        if let Some(c) = re.captures(&watch_html) {
+            author = percent_decode_str(&c[1]);
+        }
+    }
+    let mut tags: Vec<String> = Vec::new();
+    if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=genre"#) {
+        for c in re.captures_iter(&watch_html) {
+            let t = percent_decode_str(&c[1]);
+            if !t.is_empty() && !tags.contains(&t) {
+                tags.push(t);
+            }
+        }
+    }
+
+    // 画质候选：下载页里的 mp4 直链，1080 排前
+    let link_re = Regex::new(
+        r#"(?i)(?:href|src|data-url|data-src)\s*=\s*["'](https?://[^"']+?\.mp4(?:\?[^"']*)?)["']"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut urls: Vec<String> = Vec::new();
+    for c in link_re.captures_iter(&dl_html) {
+        let u = c[1].replace("&amp;", "&");
+        if !urls.contains(&u) {
+            urls.push(u);
+        }
+    }
+    if urls.is_empty() {
+        // 兜底：播放页里的 m3u8 / mp4
+        for c in extract_candidates(&watch_html, &watch_url) {
+            if c.kind == "video" && !urls.contains(&c.url) {
+                urls.push(c.url);
+            }
+        }
+    }
+    let rank = |u: &String| -> u8 {
+        let l = u.to_ascii_lowercase();
+        if l.contains("1080") { 0 } else if l.contains("720") { 1 } else if l.contains("480") { 2 } else { 3 }
+    };
+    urls.sort_by_key(rank);
+
+    // 落盘名用作品标题（去掉非法字符）：文件名就是标题，入库后按标题匹配元数据才不会错位
+    let file_base: String = title
+        .chars()
+        .map(|c| if "<>:/\\|?*\"".contains(c) { '_' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let file_base = if file_base.is_empty() { format!("hanime-{id}") } else { file_base };
+    let candidates: Vec<MediaCandidate> = urls
+        .into_iter()
+        .enumerate()
+        .map(|(_i, url)| MediaCandidate {
+            url,
+            name: format!("{file_base}.mp4"),
+            kind: "video".into(),
+        })
+        .collect();
+
+    let mut note = format!("hanime1 · 作品 {id} · 找到 {} 个画质", candidates.len());
+    if !author.is_empty() {
+        note.push_str(&format!(" · 作者：{author}"));
+    }
+    if !tags.is_empty() {
+        note.push_str(&format!(" · 标签：{}", tags.join("、")));
+    }
+
+    Ok(ResolveReport { site: "hanime1.me".into(), title, candidates, note })
+}
+
+fn percent_decode_str(s: &str) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 /// 用 curl 下载单个 URL，带断点续传（-C -）与进度解析。
 pub fn download_one(
     app: &AppHandle,
     task_id: i64,
     url: &str,
     target: &Path,
+    referer: Option<&str>,
 ) -> Result<(i64, i64), String> {
     let curl = find_curl().ok_or("未找到 curl")?;
     if let Some(parent) = target.parent() {
@@ -147,6 +285,10 @@ pub fn download_one(
         "-A".into(), UA.into(),
         "-C".into(), "-".into(),
     ];
+    if let Some(r) = referer {
+        args.push("-e".into());
+        args.push(r.to_string());
+    }
     let start = if partial.is_file() { fs::metadata(&partial).map(|m| m.len()).unwrap_or(0) } else { 0 };
     if start > 0 {
         args.push("--continue-at".into());
@@ -265,11 +407,20 @@ pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
             let _ = app.emit("download-progress", serde_json::json!({"id": task.id, "state": "running"}));
             let out_dir = root.join("downloads");
             let target = if task.target_path.is_empty() {
-                out_dir.join(safe_name(&task.url))
+                if task.site.contains("hanime1") && !task.title.trim().is_empty() {
+                    let mut n = safe_name(&task.title);
+                    if !n.to_ascii_lowercase().ends_with(".mp4") {
+                        n.push_str(".mp4");
+                    }
+                    out_dir.join(n)
+                } else {
+                    out_dir.join(safe_name(&task.url))
+                }
             } else {
                 PathBuf::from(&task.target_path)
             };
-            match download_one(&app, task.id, &task.url, &target) {
+            let referer = if task.site.contains("hanime1") { Some("https://hanime1.me/") } else { None };
+            match download_one(&app, task.id, &task.url, &target, referer) {
                 Ok((done, total)) => {
                     let st = app.state::<crate::AppState>().clone();
                 let Ok(guard) = st.inner_lock() else { return; };

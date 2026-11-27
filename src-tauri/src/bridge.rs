@@ -13,11 +13,17 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
+use tauri::AppHandle;
+
 use crate::AppState;
 
 pub const PORT: u16 = 17890;
 
-pub fn spawn(state: AppState) {
+/// 下载队列要用 AppHandle 发进度事件，启动时存一份。
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+pub fn spawn(app: AppHandle, state: AppState) {
+    let _ = APP.set(app);
     std::thread::spawn(move || {
         let Ok(listener) = TcpListener::bind(("127.0.0.1", PORT)) else {
             // 端口被占就算了：影匣本体不受影响，脚本会提示连不上
@@ -83,6 +89,54 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
             ),
             Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
         },
+        // 让影匣去下载：脚本只给作品页，解析与落盘都在影匣里做（curl 能带 Referer）
+        ("POST", "/download") => {
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(v) => {
+                    let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let want_title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let tags = v.get("tags").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if url.is_empty() {
+                        (400, r#"{"ok":false,"error":"url 不能为空"}"#.into())
+                    } else {
+                        match crate::downloader::resolve(&url) {
+                            Ok(rep) => {
+                                match rep.candidates.iter().find(|c| c.kind == "video") {
+                                    Some(best) => {
+                                        let title = if want_title.is_empty() { rep.title.clone() } else { want_title };
+                                        let site = rep.site.clone();
+                                        let best_url = best.url.clone();
+                                        let best_name = best.name.clone();
+                                        let t2 = title.clone();
+                                        let queued = crate::with_library(state, |lib| {
+                                            crate::db::create_download(&lib.conn, &best_url, &t2, &site, "", &tags)
+                                        });
+                                        match queued {
+                                            Ok(id) => {
+                                                if let (Some(app), Ok(root)) = (APP.get(), state.library_path()) {
+                                                    crate::downloader::run_queue(app.clone(), root, 50);
+                                                }
+                                                (200, format!(
+                                                    r#"{{"ok":true,"id":{},"title":{},"file":{}}}"#,
+                                                    id, json_str(&title), json_str(&best_name)
+                                                ))
+                                            }
+                                            Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
+                                        }
+                                    }
+                                    None => (200, format!(
+                                        r#"{{"ok":false,"error":"没找到可下载的视频直链","note":{}}}"#,
+                                        json_str(&rep.note)
+                                    )),
+                                }
+                            }
+                            Err(e) => (500, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e))),
+                        }
+                    }
+                }
+                Err(e) => (400, format!(r#"{{"ok":false,"error":{}}}"#, json_str(&e.to_string()))),
+            }
+        }
         ("POST", "/hook") => match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(v) => {
                 let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
