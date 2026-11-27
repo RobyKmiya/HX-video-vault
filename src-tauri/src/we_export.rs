@@ -30,6 +30,8 @@ pub struct Status {
     pub script: String,
     pub vault_root: String,
     pub config: serde_json::Value,
+    /// 助手 /status：导出进度、成功/失败计数、最近结果（给人看的，不是日志）
+    pub export: serde_json::Value,
     pub logs: Vec<String>,
 }
 
@@ -144,6 +146,14 @@ pub fn health() -> Result<serde_json::Value, String> {
     }
 }
 
+/// 助手导出状态（/status）：进度条 + 成功失败计数 + 最近结果。
+fn export_status() -> serde_json::Value {
+    match http_get("/status") {
+        Some(body) => serde_json::from_str(&body).unwrap_or(serde_json::json!({})),
+        None => serde_json::json!({}),
+    }
+}
+
 fn spawn_helper() -> Result<u32, String> {
     if ping() {
         return Ok(0); // 已经在跑（可能旧实例），不重复起
@@ -211,6 +221,7 @@ pub fn status() -> Status {
         script: helper_script().display().to_string(),
         vault_root: config_vault_root(),
         config: load_config(),
+        export: export_status(),
         logs: tail_logs(120),
     }
 }

@@ -16,21 +16,37 @@ const PATH_FIELDS: { key: keyof WeExportStatus["config"]; label: string; hint: s
   { key: "steamLibrary", label: "创意工坊目录", hint: "workshop/content/431960" },
 ];
 
+const PHASE_LABEL: Record<string, string> = {
+  idle: "空闲",
+  collecting: "收集源文件夹",
+  copying: "正在复制视频",
+  importing: "登记入库",
+  syncing: "同步目录",
+  done: "完成",
+  error: "出错",
+};
+
+function fmtTime(ms: number) {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
 export function WeExportPanel({ onClose, notify }: Props) {
   const [st, setSt] = useState<WeExportStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [testResult, setTestResult] = useState<string>("");
+  const [showLogs, setShowLogs] = useState(false);
   const cfgRef = useRef<WeExportStatus["config"]>({});
   const [cfgDirty, setCfgDirty] = useState(false);
 
   const refresh = () => api.weExportStatus().then(setSt).catch(() => {});
   useEffect(() => {
     refresh();
-    const t = window.setInterval(refresh, 4000);
+    const t = window.setInterval(refresh, 2000);
     return () => window.clearInterval(t);
   }, []);
 
-  // 状态到达后，把 config 同步进可编辑副本（仅首次或用户没在编辑时）
   useEffect(() => {
     if (st && !cfgDirty) cfgRef.current = { ...st.config };
   }, [st, cfgDirty]);
@@ -56,9 +72,7 @@ export function WeExportPanel({ onClose, notify }: Props) {
       const buckets = Array.isArray((r as { buckets?: unknown[] }).buckets)
         ? (r as { buckets: string[] }).buckets.join("、")
         : "—";
-      setTestResult(
-        `库根：${(r as { vaultRoot?: string }).vaultRoot ?? "—"}\n区间夹：${buckets}`,
-      );
+      setTestResult(`库根：${(r as { vaultRoot?: string }).vaultRoot ?? "—"}\n区间夹：${buckets}`);
       notify("助手自检通过", "success");
     } catch (e) {
       setTestResult(String(e));
@@ -95,6 +109,11 @@ export function WeExportPanel({ onClose, notify }: Props) {
   };
 
   const alive = st?.alive;
+  const ex = st?.export?.export;
+  const history = st?.export?.history ?? [];
+  const pct = ex && ex.total > 0 ? Math.min(100, Math.round((ex.done / ex.total) * 100)) : 0;
+  const running = ex?.running ?? false;
+  const phase = PHASE_LABEL[ex?.phase ?? "idle"] ?? ex?.phase ?? "空闲";
 
   return (
     <section className="stats-panel">
@@ -115,9 +134,6 @@ export function WeExportPanel({ onClose, notify }: Props) {
           {st?.pid ? <span className="muted">PID {st.pid}</span> : null}
           {st?.vault_root ? <span className="muted truncate" title={st.vault_root}>库：{st.vault_root}</span> : null}
         </div>
-        <div className="we-status-sub">
-          <span className="muted truncate" title={st?.node_path}>node：{st?.node_path || "未找到"}</span>
-        </div>
         <div className="we-actions">
           <button className="btn primary small" disabled={busy} onClick={() => act(() => api.weExportStart(), "助手已启动")}>
             <Icon name="play" size={14} />启动
@@ -128,15 +144,54 @@ export function WeExportPanel({ onClose, notify }: Props) {
           <button className="btn small" disabled={busy} onClick={() => void doTest()}>
             <Icon name="check" size={14} />自检
           </button>
-          <button className="btn small" disabled={busy || !cfgDirty} onClick={() => void saveConfig()}>
-            <Icon name="settings" size={14} />保存配置
-          </button>
         </div>
         {testResult && <pre className="we-test-result">{testResult}</pre>}
         {!st?.node_path && (
           <div className="warning">没找到 node.exe，助手起不来。装个 Node.js 或在此配置 node 路径。</div>
         )}
       </div>
+
+      <div className="panel-card">
+        <div className="we-export-head">
+          <h2>导出状态</h2>
+          <span className={`we-phase ${running ? "running" : ex?.phase === "error" ? "err" : ""}`}>{running ? `${phase}…` : phase}</span>
+        </div>
+
+        {running && (
+          <div className="we-progress-wrap">
+            <div className="we-progress"><span style={{ width: `${pct}%` }} /></div>
+            <div className="we-progress-meta">
+              <span>{ex?.done ?? 0} / {ex?.total ?? 0} 个</span>
+              {ex?.current && <span className="truncate" title={ex.current}>{ex.current}</span>}
+            </div>
+          </div>
+        )}
+        {!running && ex?.phase === "error" && ex?.message && (
+          <div className="warning">{ex.message}</div>
+        )}
+
+        <div className="we-metrics">
+          <span className="we-metric ok"><Icon name="check" size={14} />成功 <b>{ex?.ok ?? 0}</b></span>
+          <span className="we-metric bad"><Icon name="x" size={14} />失败 <b>{ex?.failed ?? 0}</b></span>
+          <span className="we-metric skip"><Icon name="refresh" size={14} />跳过 <b>{ex?.skipped ?? 0}</b></span>
+        </div>
+      </div>
+
+      {history.length > 0 && (
+        <div className="panel-card">
+          <h2>最近导出</h2>
+          <div className="we-history">
+            {history.slice(0, 8).map((h, i) => (
+              <div key={i} className="we-history-row">
+                <span className="we-history-time">{fmtTime(h.at)}</span>
+                <span className="we-history-ok">成功 {h.exported}</span>
+                {h.failed > 0 && <span className="we-history-bad">失败 {h.failed}</span>}
+                {h.skipped > 0 && <span className="we-history-skip">跳过 {h.skipped}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="panel-card">
         <h2>配置</h2>
@@ -172,12 +227,19 @@ export function WeExportPanel({ onClose, notify }: Props) {
           <label>node 路径（可选，留空自动探测）</label>
           <input value={String(cfgRef.current.node ?? "")} onChange={(e) => setCfg("node", e.target.value)} placeholder="C:\Program Files\nodejs\node.exe" />
         </div>
+        <button className="btn primary small" disabled={busy || !cfgDirty} onClick={() => void saveConfig()} style={{ marginTop: 8 }}>
+          <Icon name="settings" size={14} />保存配置
+        </button>
       </div>
 
       <div className="panel-card">
-        <h2>最近日志</h2>
-        {!st?.logs?.length ? <p className="muted">暂无日志</p> : (
-          <div className="we-logs">{st.logs.map((l, i) => <div key={i} className="we-log-line">{l}</div>)}</div>
+        <button className="we-log-toggle" onClick={() => setShowLogs((v) => !v)}>
+          {showLogs ? "▾ 收起原始日志" : "▸ 展开原始日志（排查用）"}
+        </button>
+        {showLogs && (
+          !st?.logs?.length ? <p className="muted">暂无日志</p> : (
+            <div className="we-logs">{st.logs.map((l, i) => <div key={i} className="we-log-line">{l}</div>)}</div>
+          )
         )}
       </div>
     </section>

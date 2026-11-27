@@ -369,5 +369,31 @@ export interface WeExportStatus {
     nameFrom?: string;
     node?: string;
   };
+  /** 助手 /status：导出进度 + 成功失败计数 + 最近结果 */
+  export: {
+    ok?: boolean;
+    export?: {
+      running: boolean;
+      phase: string;
+      total: number;
+      done: number;
+      ok: number;
+      failed: number;
+      skipped: number;
+      current: string;
+      message: string;
+      startedAt: number;
+      finishedAt: number;
+    };
+    history?: WeExportHistoryItem[];
+  };
   logs: string[];
+}
+
+export interface WeExportHistoryItem {
+  at: number;
+  exported: number;
+  failed: number;
+  skipped: number;
+  target: string;
 }

@@ -882,3 +882,48 @@ body.banding, body.banding * { user-select: none; -webkit-user-select: none; }
 }
 .we-log-line { color: var(--muted); word-break: break-all; }
 .we-log-line:last-child { color: var(--text); }
+
+/* ── 壁纸导出：导出状态 / 进度条 / 成功失败计数 ── */
+.we-export-head { display: flex; align-items: center; justify-content: space-between; }
+.we-phase {
+  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 14px;
+  background: var(--surface-3); color: var(--muted);
+}
+.we-phase.running { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.we-phase.err { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+.we-progress-wrap { margin: 12px 0 4px; }
+.we-progress {
+  height: 8px; border-radius: 5px; background: var(--surface-3); overflow: hidden;
+}
+.we-progress span {
+  display: block; height: 100%; background: var(--accent);
+  border-radius: 5px; transition: width .25s ease;
+}
+.we-progress-meta {
+  display: flex; justify-content: space-between; gap: 12px; margin-top: 6px;
+  font-size: 12px; color: var(--muted);
+}
+.we-progress-meta .truncate { max-width: 70%; }
+.we-metrics { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.we-metric {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 13px;
+  padding: 5px 11px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line);
+  color: var(--muted);
+}
+.we-metric b { color: var(--text); font-variant-numeric: tabular-nums; }
+.we-metric.ok { color: var(--ok); } .we-metric.ok b { color: var(--ok); }
+.we-metric.bad { color: var(--danger); } .we-metric.bad b { color: var(--danger); }
+.we-metric.skip { color: var(--muted); } .we-metric.skip b { color: var(--muted); }
+.we-history { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.we-history-row {
+  display: flex; align-items: center; gap: 12px; font-size: 12.5px;
+  padding: 7px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line);
+}
+.we-history-time { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 52px; }
+.we-history-ok { color: var(--ok); font-weight: 600; }
+.we-history-bad { color: var(--danger); }
+.we-history-skip { color: var(--muted); }
+.we-log-toggle {
+  border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 0;
+}
+.we-log-toggle:hover { color: var(--text); }

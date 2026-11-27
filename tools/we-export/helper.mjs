@@ -48,6 +48,27 @@ function loadConfig() {
   return cfg;
 }
 
+/* ======================================================================
+ *  导出状态（供影匣面板展示进度条 / 成功失败计数，替代「给人读的日志」）
+ * ==================================================================== */
+const EXPORT_STATE = {
+  running: false,
+  phase: 'idle',        // idle | collecting | copying | importing | syncing | done | error
+  total: 0,             // 本批要复制的视频数
+  done: 0,              // 已复制
+  ok: 0, failed: 0, skipped: 0,
+  current: '',          // 正在复制的文件名
+  message: '',
+  startedAt: 0, finishedAt: 0,
+};
+const HISTORY = [];     // 最近导出结果（最多 30 条）
+
+function setExportState(patch) { Object.assign(EXPORT_STATE, patch); }
+function pushHistory(entry) {
+  HISTORY.unshift(entry);
+  if (HISTORY.length > 30) HISTORY.length = 30;
+}
+
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
 
 function logLine(msg) {
@@ -262,7 +283,7 @@ function parseBucketStart(name) {
   return Number(a);
 }
 
-async function handleExport(payload) {
+async function handleExportInner(payload) {
   const cfg = loadConfig();
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (!items.length) return { ok: false, error: '没有收到壁纸' };
@@ -346,7 +367,11 @@ async function handleExport(payload) {
 
   // 落到影匣区间夹（分桶规则与影匣 importer.rs 一致）
   const { tasks } = planIntoVault(root, todo.map((s) => s.src));
-  const copied = copyIntoVault(tasks);
+  setExportState({ phase: 'copying', total: tasks.length, done: 0, current: '' });
+  const copied = await copyIntoVault(tasks, (done, total, t) => {
+    setExportState({ done, total, current: path.basename(t.source) });
+  });
+  setExportState({ phase: 'importing', current: '' });
   const doneFiles = [];
 
   copied.forEach((c, i) => {
@@ -395,6 +420,26 @@ async function handleExport(payload) {
   };
 }
 
+/* 包裹层：把导出状态喂给影匣面板（进度条 / 成功失败计数） */
+async function handleExport(payload) {
+  setExportState({
+    running: true, phase: 'collecting', total: 0, done: 0,
+    ok: 0, failed: 0, skipped: 0, current: '', message: '', startedAt: Date.now(),
+  });
+  try {
+    const r = await handleExportInner(payload);
+    const ok = Number(r.exported || 0);
+    const failed = Number(r.failed || 0);
+    const skipped = Number(r.skipped || 0);
+    setExportState({ running: false, phase: 'done', finishedAt: Date.now(), ok, failed, skipped });
+    pushHistory({ at: Date.now(), exported: ok, failed, skipped, target: r.target || '' });
+    return r;
+  } catch (e) {
+    setExportState({ running: false, phase: 'error', finishedAt: Date.now(), message: e.message });
+    throw e;
+  }
+}
+
 /* ======================================================================
  *  三、HTTP 服务
  * ==================================================================== */
@@ -414,6 +459,10 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (url.pathname === '/ping') return json(res, 200, { ok: true, version: 2, pid: process.pid });
+
+    if (url.pathname === '/status') {
+      return json(res, 200, { ok: true, export: EXPORT_STATE, history: HISTORY });
+    }
 
     if (url.pathname === '/health') {
       const cfg = loadConfig();

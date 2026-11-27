@@ -161,17 +161,21 @@ export function planIntoVault(root, sources) {
   return { root, tasks };
 }
 
-/** 复制（逐个 copyFileSync：fs.cpSync 在 Windows 上会把中文路径按 GBK 误解码） */
-export function copyIntoVault(tasks) {
+/** 复制（异步 + 进度回调：copyFileSync 会阻塞事件循环，/status 就没法实时上报了） */
+export async function copyIntoVault(tasks, onProgress) {
   const done = [];
+  let idx = 0;
   for (const t of tasks) {
+    if (onProgress) onProgress(idx, tasks.length, t);
     try {
-      fs.copyFileSync(t.source, t.target);
-      const size = fs.statSync(t.target).size;
+      await fs.promises.copyFile(t.source, t.target);
+      const size = (await fs.promises.stat(t.target)).size;
       done.push({ ...t, size, ok: true });
     } catch (e) {
       done.push({ ...t, ok: false, error: e.message });
     }
+    idx += 1;
+    if (onProgress) onProgress(idx, tasks.length, t);
   }
   return done;
 }
