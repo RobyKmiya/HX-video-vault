@@ -14,6 +14,7 @@ import type {
   MediaMeta,
   MoveTarget,
   PlaybackInfo,
+  OrganizeReport,
   PurgeReport,
   ResolveReport,
   ScanReport,
@@ -52,6 +53,8 @@ export const api = {
   trash: (id: number, trashed: boolean) => invoke<void>("trash_video", { id, trashed }),
   /** 彻底删除回收站条目：连磁盘文件一起删，不可恢复 */
   purgeVideos: (ids: number[]) => invoke<PurgeReport>("purge_videos", { ids }),
+  /** 手动整理库：按 200/夹 收进 1、2、3… 号文件夹 */
+  organizeLibrary: () => invoke<OrganizeReport>("organize_library"),
   tags: () => invoke<Tag[]>("list_tags"),
   createTag: (name: string, category: string, weight: number) =>
     invoke<number>("create_tag", { name, category, weight }),

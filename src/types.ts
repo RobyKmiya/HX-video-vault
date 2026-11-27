@@ -21,6 +21,11 @@ export interface VideoItem {
   note: string;
   favorite: boolean;
   trashed: boolean;
+  /** 导入计数：第几个被导入的视频（全局递增） */
+  import_seq: number;
+  /** 位置计数：第几号文件夹 / 夹内第几条 */
+  folder_no: number;
+  slot_no: number;
   contact_sheet: string;
   /** 用户自选封面路径（优先于接触表展示；空 = 未自选） */
   cover: string;
@@ -143,6 +148,10 @@ export interface Settings {
   show_card_info?: boolean;
   /** 影片墙卡片缩放倍率：0.6~1.8，1.0 = 默认 208px 宽。Ctrl+滚轮也能调 */
   grid_zoom?: number;
+  /** 主题：dark（橙黑暗色，默认）/ light */
+  theme?: string;
+  /** 自定义主色（#rrggbb），空 = 用主题默认 */
+  accent?: string;
 }
 
 /** 移动对话框的目标文件夹（库根 + 各 auto 文件夹） */
@@ -327,4 +336,11 @@ export interface PurgeReport {
   deleted: number;
   bytes: number;
   failed: string[];
+}
+
+/** 库整理结果 */
+export interface OrganizeReport {
+  moved: number;
+  folders: number;
+  skipped: string[];
 }

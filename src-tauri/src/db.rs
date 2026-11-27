@@ -12,7 +12,7 @@ use crate::models::{
 
 
 // ── 共享类型 / 常量 / helper（被多个领域引用，留在此处）──
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -267,6 +267,8 @@ pub(crate) mod stats;
 pub use stats::*;
 pub(crate) mod downloads;
 pub use downloads::*;
+pub(crate) mod organize;
+pub use organize::*;
 
 #[cfg(test)]
 mod tests;

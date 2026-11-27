@@ -930,3 +930,36 @@
         drop(ctx);
         let _ = fs::remove_dir_all(&root);
     }
+
+#[test]
+fn organize_moves_into_numbered_folders_and_updates_db() {
+    let (root, ctx) = temp_lib();
+    let old_dir = root.join("0-199");
+    fs::create_dir_all(&old_dir).unwrap();
+    let a = old_dir.join("a.mp4");
+    let b = root.join("loose.mp4");
+    fs::write(&a, b"a").unwrap();
+    fs::write(&b, b"b").unwrap();
+    upsert_video(&ctx.conn, &rec(&a.to_string_lossy(), 0)).unwrap();
+    upsert_video(&ctx.conn, &rec(&b.to_string_lossy(), 0)).unwrap();
+
+    let report = organize_numbered(&ctx, FOLDER_CAP).unwrap();
+    assert_eq!(report.moved, 2, "两个文件都该搬进 1 号夹");
+    assert!(root.join("1").join("a.mp4").is_file());
+    assert!(root.join("1").join("loose.mp4").is_file());
+    assert!(!a.exists() && !b.exists(), "原位置不应残留");
+
+    let paths: Vec<String> = {
+        let mut stmt = ctx.conn.prepare("SELECT path FROM videos ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect()
+    };
+    assert!(paths.iter().all(|p| p.contains("\\1\\")), "库记录应指向新路径：{paths:?}");
+    let slots: Vec<(i64, i64)> = {
+        let mut stmt = ctx.conn.prepare("SELECT folder_no, slot_no FROM videos ORDER BY id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
+    };
+    assert_eq!(slots, vec![(1, 1), (1, 2)], "位置计数应为 1 号夹第 1、2 条");
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(root);
+}

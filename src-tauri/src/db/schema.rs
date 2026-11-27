@@ -1,4 +1,5 @@
 //! `schema` 数据库操作，从 db.rs 拆出；逻辑未改。
+use super::organize::backfill_positions;
 use super::*;
 
 /// 打开（必要时创建）一个影匣库。库数据放在 <root>/.vault/vault.db，
@@ -152,6 +153,11 @@ CREATE TABLE IF NOT EXISTS videos (
   fingerprint TEXT NOT NULL DEFAULT '',
   -- 被判定为重复后指向保留的那条的 id；0 = 自己就是保留项
   dedup_of INTEGER NOT NULL DEFAULT 0,
+  -- 导入计数：第几个被导入的视频（全局递增，按 added_at/id）
+  import_seq INTEGER NOT NULL DEFAULT 0,
+  -- 位置计数：第几号文件夹（1,2,3…）、夹内第几条（1..200）
+  folder_no INTEGER NOT NULL DEFAULT 0,
+  slot_no INTEGER NOT NULL DEFAULT 0,
   UNIQUE(path, entry_index)
 );
 CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(path);
@@ -316,6 +322,36 @@ CREATE TABLE IF NOT EXISTS download_tasks (
             }
         }
         conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_videos_fp ON videos(fingerprint)")
+            .map_err(|e| e.to_string())?;
+    }
+    // v7 → v8：加导入计数 / 位置计数。导入计数按入伙顺序递增；位置计数从现有目录名反推
+    //（纯数字夹 = 第几号夹，`0-199` 这类区间夹按 200 一段折成 1..N），夹内序号按导入顺序。
+    if version < 8 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(videos)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for (name, ddl) in [
+            ("import_seq", "ALTER TABLE videos ADD COLUMN import_seq INTEGER NOT NULL DEFAULT 0"),
+            ("folder_no", "ALTER TABLE videos ADD COLUMN folder_no INTEGER NOT NULL DEFAULT 0"),
+            ("slot_no", "ALTER TABLE videos ADD COLUMN slot_no INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !cols.iter().any(|c| c == name) {
+                conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+            }
+        }
+        // 导入计数：同一秒按 id 兜底，保证严格全序
+        conn.execute_batch(
+            "UPDATE videos SET import_seq = (
+               SELECT COUNT(*) FROM videos v2
+               WHERE v2.added_at < videos.added_at
+                  OR (v2.added_at = videos.added_at AND v2.id <= videos.id)
+             );",
+        )
+        .map_err(|e| e.to_string())?;
+        backfill_positions(conn)?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_videos_import_seq ON videos(import_seq)")
             .map_err(|e| e.to_string())?;
     }
     if version < SCHEMA_VERSION {

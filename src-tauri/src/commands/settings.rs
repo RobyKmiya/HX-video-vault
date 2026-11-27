@@ -95,6 +95,16 @@ pub(crate) async fn scan(
     let state = state.inner().clone();
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 扫描前先把散落/旧夹里的视频收进编号夹（1、2、3…每夹 200），再走目录，
+        // 保证「扫描」同时也是「整理」，下载夹不会越堆越乱。
+        {
+            let guard = state.lock()?;
+            if let Ok(lib) = library(&guard) {
+                if db::needs_organize(&lib.root) {
+                    let _ = db::organize_numbered(lib, db::FOLDER_CAP);
+                }
+            }
+        }
         let (root, known) = {
             let guard = state.lock()?;
             let lib = library(&guard)?;

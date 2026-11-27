@@ -809,3 +809,33 @@ body.is-splitting * { cursor: col-resize !important; }
 }
 /* 框选过程中禁止选中文字/图片，避免拖出蓝色选区 */
 body.banding, body.banding * { user-select: none; -webkit-user-select: none; }
+
+/* ── 橙黑暗色主题（默认）── */
+:root[data-theme="dark"] {
+  --bg: #14110f;
+  --surface: #1c1815;
+  --surface-2: #241f1a;
+  --surface-3: #2d2721;
+  --text: #f3ece3;
+  --muted: #a89c8e;
+  --line: #322a23;
+  --line-strong: #423931;
+  --accent-soft: rgba(249, 115, 22, .16);
+  --shadow: 0 6px 24px rgba(0, 0, 0, .5);
+  --shadow-lg: 0 18px 60px rgba(0, 0, 0, .65);
+}
+/* 浅色底色的提示块在暗色下换成同色系深底，别刺眼 */
+:root[data-theme="dark"] .candidate-kind.archive { background: #3a2a14; color: #ffb765; }
+:root[data-theme="dark"] .task-state.paused,
+:root[data-theme="dark"] .task-state.failed { background: #3a1b1f; color: #ff9aa3; }
+:root[data-theme="dark"] .warning { background: #3a2a14; border-color: #6b4a1a; color: #ffcb85; }
+:root[data-theme="dark"] .boot-splash { background: #0d0b09; }
+:root[data-theme="dark"] .sidebar { background: #17130f; }
+:root[data-theme="dark"] .toolbar { background: #17130f; }
+
+/* 设置里的主色选择器 */
+.theme-color { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.theme-color input[type="color"] {
+  width: 34px; height: 26px; padding: 0; border: 1px solid var(--line-strong);
+  border-radius: 6px; background: var(--surface); cursor: pointer;
+}

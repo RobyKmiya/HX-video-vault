@@ -89,16 +89,42 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>({
     library_root: null, ffmpeg_path: null, ffprobe_path: null, player_pref: "auto", mpv_path: null,
     import_root: null, double_click: "play", immersive_default: false, show_card_info: true, grid_zoom: 1,
+    theme: "dark", accent: "",
   });
   const [startupError, setStartupError] = useState<string | null>(null);
 
   const [view, setView] = useState<ViewKey>("all");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [sort, setSort] = useState("added");
+  // 每个页面各自记住排序（资料库各视图互不干扰）；存在 localStorage，重启也还在
+  const SORT_STORE = "vv.sortByView";
+  const [sortByView, setSortByView] = useState<Record<string, { sort: string; rev: boolean }>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SORT_STORE) ?? "{}") as Record<string, { sort: string; rev: boolean }>;
+    } catch { return {}; }
+  });
+  const curSort = sortByView[view] ?? { sort: "added", rev: false };
+  const sort = curSort.sort;
   // 逆序开关：后端用 "-" 前缀表示取反（无前缀 = 各键默认方向）
-  const [sortRev, setSortRev] = useState(false);
+  const sortRev = curSort.rev;
   const sortParam = sortRev ? `-${sort}` : sort;
+  const setSort = useCallback((next: string | ((v: string) => string)) => {
+    setSortByView((m) => {
+      const prev = m[view] ?? { sort: "added", rev: false };
+      const value = typeof next === "function" ? next(prev.sort) : next;
+      return { ...m, [view]: { sort: value, rev: value === prev.sort ? prev.rev : false } };
+    });
+  }, [view]);
+  const setSortRev = useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    setSortByView((m) => {
+      const prev = m[view] ?? { sort: "added", rev: false };
+      const value = typeof next === "function" ? next(prev.rev) : next;
+      return { ...m, [view]: { sort: prev.sort, rev: value } };
+    });
+  }, [view]);
+  useEffect(() => {
+    try { localStorage.setItem(SORT_STORE, JSON.stringify(sortByView)); } catch { /* 忽略隐私模式 */ }
+  }, [sortByView]);
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [activeCollection, setActiveCollection] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -199,6 +225,16 @@ export default function App() {
   const refreshSheetStatus = useCallback(async () => {
     try { setSheet(await api.sheetStatus()); } catch { /* 库未打开时忽略 */ }
   }, []);
+
+  // 主题：data-theme 控制整套配色，主色写进 CSS 变量；自定义色只覆盖强调色，不动明暗
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = settings.theme === "light" ? "light" : "dark";
+    const custom = settings.accent ?? "";
+    const accent = /^#[0-9a-fA-F]{6}$/.test(custom) ? custom : "#f97316";
+    root.style.setProperty("--accent", accent);
+    root.style.setProperty("--accent-soft", `${accent}26`);
+  }, [settings.theme, settings.accent]);
 
   const activeCollections = useMemo(() => collections.filter((c) => c.deleted_at === 0), [collections]);
 
@@ -422,6 +458,21 @@ export default function App() {
     }).catch(() => {});
     return () => { cancelled = true; unlisten?.(); };
   }, []);
+
+  // 启动时后台整理完库（或手动整理）→ 刷新列表，让新位置立刻生效
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      return listen<number>("library-organized", (e) => {
+        const moved = Number(e.payload ?? 0);
+        notify(moved > 0 ? `已自动整理 ${moved} 个视频到编号文件夹` : "目录已是最新");
+        void refreshMeta();
+        reloadRef.current();
+      });
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn; }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, [notify, refreshMeta]);
 
   // 拖拽导入：系统级文件拖放（Tauri 原生事件，给的是真实文件路径），松手即入传输队列
   useEffect(() => {

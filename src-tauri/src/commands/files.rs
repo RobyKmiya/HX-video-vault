@@ -299,3 +299,20 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 }
+
+// ---------- 库整理：按 200/夹 收进 1、2、3… 号文件夹 ----------
+
+/// 手动/启动时整理库：把活跃视频按导入顺序装箱到编号夹，返回移动了多少。
+#[tauri::command]
+pub(crate) async fn organize_library(
+    state: State<'_, AppState>,
+) -> Result<db::OrganizeReport, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ctx = state.lock()?;
+        let lib = library(&ctx)?;
+        db::organize_numbered(lib, db::FOLDER_CAP)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

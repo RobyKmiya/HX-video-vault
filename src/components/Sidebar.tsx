@@ -152,10 +152,10 @@ export function Sidebar(props: Props) {
         </div>
         {collectionGroups.map(([group, list]) => (
           <div key={group || "__none"} className="tag-group">
-            {group && (
+            {(group || collectionGroups.length > 1) && (
               <div className="tag-group-head static">
                 <Icon name="folder" size={12} />
-                <span>{group}</span>
+                <span>{group || "未分类"}</span>
                 <span className="tag-group-count">{list.length}</span>
               </div>
             )}

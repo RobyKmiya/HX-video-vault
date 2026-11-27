@@ -127,7 +127,7 @@ export function SettingsModal({
               }}>选择</button>
               <button className="btn" title="清空 = 用库根下的 Supervideo" onClick={() => setDraft((d) => ({ ...d, import_root: null }))}>默认</button>
             </div>
-            <p className="hint">拖视频进来就复制到这个根目录下的区间夹：0-199、200-399…每夹 200 个，顺序排、满了自动开新区间，删出空位就往前补。</p>
+            <p className="hint">拖视频进来就复制到这个根目录下的编号夹：1、2、3…每夹 200 个，只往后追加、不再回头填空位；满了自动开下一号。</p>
           </div>
           <div className="field">
             <label>播放器内核</label>
@@ -150,6 +150,25 @@ export function SettingsModal({
               <option value="detail">打开详情抽屉</option>
             </select>
             <p className="hint">单击始终是选中并打开详情；双击走这里的设置。</p>
+          </div>
+          <div className="field">
+            <label>主题</label>
+            <div className="field-row">
+              <select value={draft.theme || "dark"} onChange={(e) => setDraft((d) => ({ ...d, theme: e.target.value }))}>
+                <option value="dark">橙黑（暗色，默认）</option>
+                <option value="light">浅色</option>
+              </select>
+              <label className="theme-color" title="主色：按钮、选中态、进度条都用它">
+                <span>主色</span>
+                <input
+                  type="color"
+                  value={/^#[0-9a-fA-F]{6}$/.test(draft.accent || "") ? draft.accent : "#f97316"}
+                  onChange={(e) => setDraft((d) => ({ ...d, accent: e.target.value }))}
+                />
+              </label>
+              <button className="btn" onClick={() => setDraft((d) => ({ ...d, accent: "" }))} title="恢复主题默认色">默认色</button>
+            </div>
+            <p className="hint">主色会影响按钮、选中态、进度条与聚焦高亮。留空 = 用主题自带色（橙黑主题默认 #f97316）。</p>
           </div>
           <div className="field setting-checks">
             <label><input type="checkbox" checked={!!draft.immersive_default} onChange={(e) => setDraft((d) => ({ ...d, immersive_default: e.target.checked }))} />播放默认无边框沉浸</label>

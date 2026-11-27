@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use db::LibraryContext;
 
@@ -44,12 +44,19 @@ pub struct Settings {
     /// 影片墙卡片缩放倍率（0.6~1.8，1.0 = 默认 208px）。Ctrl+滚轮也能调。
     #[serde(default = "default_grid_zoom")]
     pub grid_zoom: f64,
+    /// 主题：dark（橙黑暗色，默认）/ light
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// 自定义主色（#rrggbb），空 = 用主题默认橙
+    #[serde(default)]
+    pub accent: String,
 }
 
 fn default_player_pref() -> String { "auto".into() }
 fn default_double_click() -> String { "play".into() }
 fn default_show_card_info() -> bool { true }
 fn default_grid_zoom() -> f64 { 1.0 }
+fn default_theme() -> String { "dark".into() }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -64,6 +71,8 @@ impl Default for Settings {
             immersive_default: false,
             show_card_info: true,
             grid_zoom: 1.0,
+            theme: default_theme(),
+            accent: String::new(),
         }
     }
 }
@@ -274,6 +283,26 @@ pub fn run() {
         .setup(|app| {
             let state = AppState::new(app.handle());
             app.manage(state);
+            // 启动后后台整理一次：浏览器常把新视频直接下到库根/老夹里，收进编号夹再浏览不容易卡。
+            // 先做便宜判断，没东西可整就完全不碰库。
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    let Some(state) = handle.try_state::<AppState>() else { return };
+                    let st = state.inner().clone();
+                    let Ok(ctx) = st.lock() else { return };
+                    let Ok(lib) = library(&ctx) else { return };
+                    if !db::needs_organize(&lib.root) {
+                        return;
+                    }
+                    if let Ok(report) = db::organize_numbered(lib, db::FOLDER_CAP) {
+                        if report.moved > 0 {
+                            let _ = handle.emit("library-organized", report.moved);
+                        }
+                    }
+                });
+            }
             // 注册老板键呼回（默认 Ctrl+Shift+H，可在设置里改；失败不拦启动）
             {
                 let binding = commands::window::load_boss_recall(app.handle());
@@ -348,6 +377,7 @@ pub fn run() {
             commands::files::move_videos,
             commands::files::reveal_video,
             commands::files::purge_videos,
+            commands::files::organize_library,
             commands::window::set_immersive,
             commands::window::set_fullscreen,
             commands::window::hide_main_window,

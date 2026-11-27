@@ -86,20 +86,26 @@ pub fn parse_start(name: &str) -> Option<u64> {
     Some(start)
 }
 
-/// 从候选里挑目标夹：按区间起点升序找第一个未满夹（漏缺往前补）；全满则开新区间。
+/// 目录名 → 夹编号：纯数字直接用；旧的 `0-199` 区间按 cap 一段折成 1、2、3…
+/// （与 `db::organize::folder_number_of` 同一套规则，迁移时两边能对上。）
+pub fn folder_no(name: &str) -> Option<u64> {
+    let t = name.trim();
+    if let Ok(n) = t.parse::<u64>() {
+        return if n > 0 { Some(n) } else { None };
+    }
+    let (a, _) = t.split_once('-')?;
+    let start: u64 = a.trim().parse().ok()?;
+    Some(start / CAP + 1)
+}
+
+/// 挑目标夹：**只往最后一号夹里追加，装满了才开下一号**，不再回头填旧夹的空缺。
 /// `counts` 是"现状 + 本批已分配"的虚拟计数，调用方负责维护。
 pub fn pick_target(order: &[String], counts: &std::collections::HashMap<String, u64>, cap: u64) -> String {
-    for name in order {
-        if counts.get(name).copied().unwrap_or(0) < cap {
-            return name.clone();
-        }
+    match order.last() {
+        Some(last) if counts.get(last).copied().unwrap_or(0) < cap => last.clone(),
+        Some(last) => (folder_no(last).unwrap_or(0) + 1).to_string(),
+        None => "1".to_string(),
     }
-    let start = order
-        .last()
-        .and_then(|n| parse_start(n))
-        .map(|s| s + cap)
-        .unwrap_or(0);
-    format!("{start}-{}", start + cap - 1)
 }
 
 /// 目标夹内不重名的落盘名：原名可用则原样保留，冲突加 (2)、(3)…
@@ -143,14 +149,14 @@ pub fn plan_targets(import_root: &Path, sources: &[PathBuf]) -> Result<Vec<Impor
             continue;
         }
         let Some(name) = p.file_name().map(|s| s.to_string_lossy().to_string()) else { continue };
-        if parse_start(&name).is_none() {
-            continue; // 非 N-M 命名的子目录不作为导入目标
+        if folder_no(&name).is_none() {
+            continue; // 只认「纯数字」与旧的「N-M」两种目录名
         }
         let count = count_videos(&p);
         order.push(name.clone());
         counts.insert(name, count);
     }
-    order.sort_by_key(|n| parse_start(n).unwrap_or(0));
+    order.sort_by_key(|n| folder_no(n).unwrap_or(0));
 
     let mut tasks = Vec::new();
     for src in sources {
@@ -398,31 +404,38 @@ mod tests {
     }
 
     #[test]
-    fn pick_target_fills_smallest_unfilled_first() {
-        let mut counts = HashMap::new();
-        counts.insert("0-199".into(), 200u64);
-        counts.insert("200-399".into(), 198u64);
-        counts.insert("400-599".into(), 0u64);
-        let order = vec!["0-199".into(), "200-399".into(), "400-599".into()];
-        // 满 200 的夹直接跳过：漏缺往前补（200-399 还有 2 个空位）
-        assert_eq!(pick_target(&order, &counts, 200), "200-399");
-        counts.insert("200-399".into(), 200u64);
-        assert_eq!(pick_target(&order, &counts, 200), "400-599");
+    fn folder_no_reads_numeric_and_interval_names() {
+        assert_eq!(folder_no("1"), Some(1));
+        assert_eq!(folder_no("12"), Some(12));
+        assert_eq!(folder_no("0-199"), Some(1));
+        assert_eq!(folder_no("200-399"), Some(2));
+        assert_eq!(folder_no(" 1200-1399 "), Some(7));
+        assert_eq!(folder_no("Supervideo"), None);
+        assert_eq!(folder_no("0"), None);
     }
 
     #[test]
-    fn pick_target_opens_new_interval_when_all_full() {
-        let counts: HashMap<String, u64> = HashMap::new();
+    fn pick_target_appends_to_last_folder_without_filling_gaps() {
+        let mut counts = HashMap::new();
+        counts.insert("1".into(), 200u64);   // 装满
+        counts.insert("2".into(), 50u64);    // 有空位，但在中间
+        counts.insert("3".into(), 120u64);   // 最后一号，还有空位
+        let order = vec!["1".into(), "2".into(), "3".into()];
+        // 只往最后一号追加，不回头填 2 号的空
+        assert_eq!(pick_target(&order, &counts, 200), "3");
+        counts.insert("3".into(), 200u64);
+        // 最后一号满了 → 开 4 号
+        assert_eq!(pick_target(&order, &counts, 200), "4");
+        // 空库从 1 号起步
+        assert_eq!(pick_target(&Vec::new(), &HashMap::new(), 200), "1");
+    }
+
+    #[test]
+    fn pick_target_continues_numbering_from_legacy_interval_names() {
         let order: Vec<String> = vec!["0-199".into(), "200-399".into()];
-        let both_full = order
-            .iter()
-            .map(|n| (n.clone(), 200u64))
-            .collect::<HashMap<String, u64>>();
-        assert_eq!(pick_target(&order, &both_full, 200), "400-599");
-        let _ = counts;
-        // 空库从 0-199 起步
-        let empty: Vec<String> = Vec::new();
-        assert_eq!(pick_target(&empty, &HashMap::new(), 200), "0-199");
+        let full = order.iter().map(|n| (n.clone(), 200u64)).collect::<HashMap<String, u64>>();
+        // 老区间夹 1、2 号都满了 → 接下来是 3 号（不再是 400-599）
+        assert_eq!(pick_target(&order, &full, 200), "3");
     }
 
     #[test]
@@ -495,12 +508,12 @@ mod tests {
         }
         assert_eq!(count_videos(&full), 199, "0-199 现有 199 个视频");
 
-        // 3 个源导入：第一个进 0-199 补到 200；后两个进新开的 200-399
+        // 3 个源导入：先把 0-199 补到 200，再开下一号夹「2」（只往后追加，不另开区间）
         let tasks = plan_targets(&import_root, &srcs).unwrap();
         assert_eq!(tasks.len(), 3);
-        assert!(tasks[0].target.starts_with(&full), "第一个应补进 0-199 漏缺");
-        assert!(tasks[1].target.parent().unwrap().ends_with("200-399"), "满夹开新区间");
-        assert!(tasks[2].target.parent().unwrap().ends_with("200-399"));
+        assert!(tasks[0].target.starts_with(&full), "第一个应追加进最后一个未满夹 0-199");
+        assert!(tasks[1].target.parent().unwrap().ends_with("2"), "满了开 2 号夹");
+        assert!(tasks[2].target.parent().unwrap().ends_with("2"));
 
         // 串行复制（同 worker 行为：.part → 校验 → 改名）
         for t in &tasks {
@@ -510,7 +523,7 @@ mod tests {
             fs::rename(&part, &t.target).unwrap();
         }
         assert_eq!(count_videos(&full), 200, "0-199 应恰好装满 200");
-        let next = import_root.join("200-399");
+        let next = import_root.join("2");
         assert_eq!(count_videos(&next), 2);
         let meta = fs::metadata(&tasks[0].target).unwrap();
         assert_eq!(meta.len(), fs::metadata(&srcs[0]).unwrap().len(), "落盘大小应与源一致");

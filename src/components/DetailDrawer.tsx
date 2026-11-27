@@ -516,6 +516,8 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
             <div><dt>观看次数</dt><dd>{video.watch_count}</dd></div>
             <div><dt>上次观看</dt><dd>{relativeTime(video.last_watched_at)}</dd></div>
             <div><dt>加入时间</dt><dd>{formatDate(video.added_at)}</dd></div>
+            <div><dt>导入计数</dt><dd>{video.import_seq > 0 ? `第 ${video.import_seq.toLocaleString()} 个导入` : "—"}</dd></div>
+            <div><dt>位置计数</dt><dd>{video.folder_no > 0 ? `第 ${video.folder_no} 号夹 · 第 ${video.slot_no} 条` : "—"}</dd></div>
             {video.entry_index > 0 && <div><dt>压缩包内</dt><dd>第 {video.entry_index + 1} / {video.entry_count} 个</dd></div>}
           </dl>
         </div>
