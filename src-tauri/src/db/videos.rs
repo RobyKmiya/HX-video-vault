@@ -69,6 +69,14 @@ pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String
         }
     }
 }
+/// 彻底删除一条记录（关联的标签/收藏/封面/观看历史由外键级联清掉）。
+/// 只动库，不碰磁盘文件——文件由调用方先删。
+pub fn delete_video_row(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM videos WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn get_video(conn: &Connection, id: i64) -> Result<VideoItem, String> {
     let sql = format!("SELECT {VIDEO_COLUMNS} FROM videos v WHERE v.id=?1");
     conn.query_row(&sql, params![id], map_video).map_err(|e| e.to_string())

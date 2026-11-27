@@ -321,3 +321,10 @@ export interface FingerprintProgress {
   total: number;
   running: boolean;
 }
+
+/** 彻底删除（连磁盘文件）的执行结果 */
+export interface PurgeReport {
+  deleted: number;
+  bytes: number;
+  failed: string[];
+}

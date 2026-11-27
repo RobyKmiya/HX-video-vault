@@ -347,6 +347,7 @@ pub fn run() {
             commands::files::rename_video,
             commands::files::move_videos,
             commands::files::reveal_video,
+            commands::files::purge_videos,
             commands::window::set_immersive,
             commands::window::set_fullscreen,
             commands::window::hide_main_window,

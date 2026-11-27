@@ -293,3 +293,14 @@ pub struct FingerprintProgress {
     pub total: i64,
     pub running: bool,
 }
+
+/// 彻底删除（连磁盘文件）的执行结果
+#[derive(Debug, Clone, Serialize)]
+pub struct PurgeReport {
+    /// 真正删掉并清出库的条数
+    pub deleted: usize,
+    /// 释放的字节数（按库内登记的 size_bytes 累计）
+    pub bytes: i64,
+    /// 跳过的条目与原因（不在回收站、库根外、删文件失败等）
+    pub failed: Vec<String>,
+}

@@ -82,6 +82,37 @@
     }
 
     #[test]
+    fn delete_video_row_cascades_relations() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("D:\\del.mp4", 0)).unwrap();
+        let id: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path=?1", params!["D:\\del.mp4"], |r| r.get(0))
+            .unwrap();
+        let tag = create_tag(&ctx.conn, "删除测试", "", 0).unwrap();
+        set_tag_video(&ctx.conn, id, tag, true).unwrap();
+        set_cover(&ctx.conn, id, "D:\\c.jpg").unwrap();
+        record_watch(
+            &ctx.conn,
+            &WatchUpdate { id, progress_sec: 10.0, duration_sec: 100.0, completed: None },
+        )
+        .unwrap();
+        let coll = create_collection(&ctx.conn, "删除测试夹", "").unwrap();
+        set_collection_video(&ctx.conn, coll, id, true).unwrap();
+
+        delete_video_row(&ctx.conn, id).unwrap();
+
+        let count = |sql: &str| -> i64 { ctx.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM videos"), 0, "记录应被删掉");
+        assert_eq!(count("SELECT COUNT(*) FROM video_tags"), 0, "标签关联应级联清掉");
+        assert_eq!(count("SELECT COUNT(*) FROM video_covers"), 0, "封面应级联清掉");
+        assert_eq!(count("SELECT COUNT(*) FROM watch_history"), 0, "观看历史应级联清掉");
+        assert_eq!(count("SELECT COUNT(*) FROM collection_videos"), 0, "收藏夹关联应级联清掉");
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rescan_keeps_trashed_until_file_changes() {
         let (root, ctx) = temp_lib();
         upsert_video(&ctx.conn, &rec("D:\\t.mp4", 0)).unwrap();

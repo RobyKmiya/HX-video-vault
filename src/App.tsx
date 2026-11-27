@@ -675,6 +675,31 @@ export default function App() {
     } catch (e) { notify(String(e)); }
   };
 
+  // 彻底删除：连磁盘文件一起删，不可恢复。只对回收站里的条目开放（后端还会再校验一次）
+  const purgeIds = async (ids: number[]) => {
+    if (!ids.length) return;
+    const picked = videoPage.items.filter((v) => ids.includes(v.id));
+    const bytes = picked.reduce((sum, v) => sum + v.size_bytes, 0);
+    const preview = picked.slice(0, 3).map((v) => `「${v.file_name}」`).join("");
+    const more = picked.length > 3 ? ` 等 ${picked.length} 个` : "";
+    if (!window.confirm(
+      `彻底删除 ${ids.length} 个视频？\n${preview}${more}\n\n共 ${formatBytes(bytes)}，磁盘上的文件会一起删除，删除后无法恢复。`
+    )) return;
+    try {
+      const report = await api.purgeVideos(ids);
+      if (report.failed.length) console.warn("彻底删除跳过的条目：", report.failed);
+      const skipped = report.failed.length ? `，${report.failed.length} 条被跳过` : "";
+      notify(
+        `已彻底删除 ${report.deleted} 个，释放 ${formatBytes(report.bytes)}${skipped}`,
+        report.failed.length ? "error" : "success",
+      );
+      setSelected(new Set());
+      setDetailId(null);
+      setMenu(null);
+      await Promise.all([refreshMeta(), loadVideos(true)]);
+    } catch (e) { notify(String(e), "error"); }
+  };
+
   // 动作表：右键菜单与可录制快捷键共用同一套入口
   const runAction = (id: ActionId) => {
     const ids = selected.size ? [...selected] : detailId != null ? [detailId] : [];
@@ -1135,6 +1160,23 @@ export default function App() {
             {selected.size > 0 && (
               <div className="bulk-bar">
                 <span>已选 <b>{selected.size}</b> 条</span>
+                {view === "trash" ? (
+                  <>
+                    <button className="btn small" onClick={async () => {
+                      try {
+                        for (const id of selected) await api.trash(id, false);
+                        notify(`已恢复 ${selected.size} 条`);
+                        setSelected(new Set());
+                        await Promise.all([refreshMeta(), loadVideos(true)]);
+                      } catch (e) { notify(String(e), "error"); }
+                    }}><Icon name="check" size={14} />恢复</button>
+                    <button className="btn small danger" onClick={() => void purgeIds([...selected])}>
+                      <Icon name="trash" size={14} />彻底删除（{selected.size}）
+                    </button>
+                    <span className="muted">彻底删除会连磁盘文件一起删掉，不可恢复</span>
+                  </>
+                ) : (
+                  <>
                 <button className="btn small" onClick={() => setBulkTagOpen((v) => !v)}><Icon name="tag" size={14} />批量打标</button>
                 <button
                   className="btn small"
@@ -1173,6 +1215,8 @@ export default function App() {
                   <option value="">加入收藏夹…</option>
                   {activeCollections.filter((c) => c.kind !== "auto").map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
+                  </>
+                )}
                 <button className="btn small" onClick={() => setSelected(new Set())}>取消选择</button>
                 {bulkTagOpen && (
                   <div className="bulk-tags">
@@ -1334,7 +1378,11 @@ export default function App() {
                 setMenu(null);
               } catch (e) { notify(String(e)); } finally { setMenuBusy(false); }
             }}><Icon name="zip" size={14} />{menuBusy ? "压缩中…" : "压缩为 zip（保留原文件）"}</button>
-            <button className="danger" onClick={() => runAction("edit.trash")}><Icon name="trash" size={14} />移入影匣回收站</button>
+            {view === "trash" ? (
+              <button className="danger" onClick={() => void purgeIds(menu.ids)}><Icon name="trash" size={14} />彻底删除（不可恢复）</button>
+            ) : (
+              <button className="danger" onClick={() => runAction("edit.trash")}><Icon name="trash" size={14} />移入影匣回收站</button>
+            )}
           </div>
         </>
       )}

@@ -1,32 +1,33 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
-  DuplicateGroup,
-  FingerprintProgress,
-  FolderInfo,
   DownloadTask,
+  DuplicateGroup,
   EditReport,
   EditSource,
   EditStatus,
   EngineInfo,
+  FingerprintProgress,
+  FolderInfo,
   ImportStatus,
   LibraryInfo,
   MediaMeta,
   MoveTarget,
-  ResolveReport,
   PlaybackInfo,
+  PurgeReport,
+  ResolveReport,
   ScanReport,
   Settings,
   SheetReport,
   SheetStatus,
-  WatchRecord,
   Stats,
   Tag,
   VideoItem,
   VideoPage,
   VideoPatch,
   VideoQuery,
-  WatchUpdate,
+  WatchRecord,
+  WatchUpdate
 } from "./types";
 
 // 后端 ScanOptions 在 types 中无需重复声明，这里补齐
@@ -49,6 +50,8 @@ export const api = {
   patch: (patch: VideoPatch) => invoke<void>("patch_video", { patch }),
   watch: (u: WatchUpdate) => invoke<void>("record_watch", { u }),
   trash: (id: number, trashed: boolean) => invoke<void>("trash_video", { id, trashed }),
+  /** 彻底删除回收站条目：连磁盘文件一起删，不可恢复 */
+  purgeVideos: (ids: number[]) => invoke<PurgeReport>("purge_videos", { ids }),
   tags: () => invoke<Tag[]>("list_tags"),
   createTag: (name: string, category: string, weight: number) =>
     invoke<number>("create_tag", { name, category, weight }),

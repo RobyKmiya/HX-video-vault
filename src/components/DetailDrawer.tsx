@@ -530,7 +530,29 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
           >
             <Icon name="trash" size={15} />{video.trashed ? "从回收站恢复" : "移入回收站"}
           </button>
-          <p className="hint">只从库中移除记录，不会删除磁盘上的视频文件。</p>
+          {video.trashed && (
+            <button
+              className="btn danger full"
+              onClick={async () => {
+                if (!window.confirm(
+                  `彻底删除「${video.file_name}」？\n\n磁盘上的文件会一起删除，删除后无法恢复。`
+                )) return;
+                try {
+                  const r = await api.purgeVideos([video.id]);
+                  if (r.deleted === 0) throw new Error(r.failed[0] ?? "删除失败");
+                  onChanged();
+                  onClose();
+                } catch (e) { onError(String(e)); }
+              }}
+            >
+              <Icon name="x" size={15} />彻底删除（连磁盘文件）
+            </button>
+          )}
+          <p className="hint">
+            {video.trashed
+              ? "「从回收站恢复」只改库标记；「彻底删除」会连磁盘文件一起删掉，不可恢复。"
+              : "移入回收站只改库标记，不删除磁盘文件。"}
+          </p>
         </div>
       </div>
 
