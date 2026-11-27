@@ -10,6 +10,7 @@ import { Player } from "./components/Player";
 import { StatsPanel } from "./components/StatsPanel";
 import { TagManager } from "./components/TagManager";
 import { DownloadPanel } from "./components/DownloadPanel";
+import { WeExportPanel } from "./components/WeExportPanel";
 import { DedupePanel } from "./components/DedupePanel";
 import { EditPanel } from "./components/EditPanel";
 import { MoveDialog } from "./components/MoveDialog";
@@ -144,6 +145,7 @@ export default function App() {
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [dedupeOpen, setDedupeOpen] = useState(false);
+  const [weExportOpen, setWeExportOpen] = useState(false);
   // 从详情页/批量栏带进剪辑面板的素材；面板关闭时清空，避免下次打开误带入
   const [editPrefill, setEditPrefill] = useState<VideoItem[] | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -1113,7 +1115,7 @@ export default function App() {
     );
   }
 
-  const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen || dedupeOpen;
+  const showPanel = statsOpen || tagsOpen || downloadOpen || editOpen || dedupeOpen || weExportOpen;
 
   return (
     <div className="app-shell">
@@ -1125,7 +1127,7 @@ export default function App() {
           setView(v); setActiveTag(null); setActiveCollection(null); setFolderPath([]);
           // 「最近入库」是固定语义：跨所有文件夹、按真实入库顺序，不能沿用上一个视图的排序
           if (v === "latest") { setSort("added"); setSortRev(false); }
-          setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); setSelected(new Set());
+          setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); setWeExportOpen(false); setSelected(new Set());
         }}
         tags={tags}
         activeTag={activeTag}
@@ -1142,15 +1144,17 @@ export default function App() {
         onCreateCollection={() => setCollectionsOpen(true)}
         onManageCollections={() => setCollectionsOpen(true)}
         onReordered={() => void refreshMeta()}
-        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); }}
-        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); }}
-        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); setDedupeOpen(false); }}
-        onEdit={() => { setEditOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setDedupeOpen(false); }}
+        onStats={() => { setStatsOpen(true); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); setWeExportOpen(false); }}
+        onTags={() => { setTagsOpen(true); setStatsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); setWeExportOpen(false); }}
+        onDownload={() => { setDownloadOpen(true); setStatsOpen(false); setTagsOpen(false); setEditOpen(false); setDedupeOpen(false); setWeExportOpen(false); }}
+        onWeExport={() => { setWeExportOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setEditOpen(false); setDedupeOpen(false); }}
+        onEdit={() => { setEditOpen(true); setStatsOpen(false); setTagsOpen(false); setDownloadOpen(false); setDedupeOpen(false); setWeExportOpen(false); }}
         onSettings={() => setSettingsOpen(true)}
         statsOpen={statsOpen}
         tagsOpen={tagsOpen}
         downloadOpen={downloadOpen}
         editOpen={editOpen}
+        weExportOpen={weExportOpen}
       />
 
       <Splitter
@@ -1175,6 +1179,7 @@ export default function App() {
             : editOpen ? <EditPanel prefill={editPrefill}
                 onClose={() => { setEditOpen(false); setEditPrefill(null); }}
                 onImported={() => { void refreshMeta(); void loadVideos(true); }} notify={notify} />
+            : weExportOpen ? <WeExportPanel onClose={() => setWeExportOpen(false)} notify={notify} />
             : <TagManager tags={tags} onClose={() => setTagsOpen(false)} onChanged={() => { void refreshMeta(); void loadVideos(true); }} onError={notify} />
         ) : (
           <>

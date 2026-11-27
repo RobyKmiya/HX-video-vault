@@ -10,6 +10,7 @@ pub mod player;
 mod proc;
 pub(crate) mod bridge;
 pub(crate) mod commands;
+pub(crate) mod we_export;
 
 use std::fs;
 use std::path::PathBuf;
@@ -298,6 +299,8 @@ pub fn run() {
             if let Some(st) = app.try_state::<AppState>() {
                 crate::bridge::spawn(app.handle().clone(), st.inner().clone());
             }
+            // 壁纸导出助手：影匣作为唯一守护拉起并盯住它（死了自动重启）
+            crate::we_export::start();
             // 启动后后台整理一次：浏览器常把新视频直接下到库根/老夹里，收进编号夹再浏览不容易卡。
             // 先做便宜判断，没东西可整就完全不碰库。
             {
@@ -406,6 +409,11 @@ pub fn run() {
             commands::dedupe::dedupe_apply,
             commands::dedupe::dedupe_apply_selected,
             commands::dedupe::purge_missing_trashed,
+            commands::we_export::we_export_status,
+            commands::we_export::we_export_start,
+            commands::we_export::we_export_stop,
+            commands::we_export::we_export_test,
+            commands::we_export::we_export_set_config,
         ])
         .run(tauri::generate_context!())
         .expect("影匣启动失败");

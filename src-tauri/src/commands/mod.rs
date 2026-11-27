@@ -11,6 +11,7 @@ pub(crate) mod covers;
 pub(crate) mod imports;
 pub(crate) mod files;
 pub(crate) mod window;
+pub(crate) mod we_export;
 
 pub(crate) mod prelude {
     //! 命令模块共用导入。每个子模块只需 `use super::prelude::*;`。

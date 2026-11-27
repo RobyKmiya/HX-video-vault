@@ -28,7 +28,8 @@ import type {
   VideoPatch,
   VideoQuery,
   WatchRecord,
-  WatchUpdate
+  WatchUpdate,
+  WeExportStatus
 } from "./types";
 
 // 后端 ScanOptions 在 types 中无需重复声明，这里补齐
@@ -162,4 +163,11 @@ export const api = {
     invoke<number>("dedupe_apply_selected", { pairs }),
   /** 清掉回收站里文件已不在的幽灵行 */
   purgeMissingTrashed: () => invoke<number>("purge_missing_trashed"),
+  /** 壁纸导出助手：状态 / 启停 / 自检 / 改配置 */
+  weExportStatus: () => invoke<WeExportStatus>("we_export_status"),
+  weExportStart: () => invoke<void>("we_export_start"),
+  weExportStop: () => invoke<void>("we_export_stop"),
+  weExportTest: () => invoke<Record<string, unknown>>("we_export_test"),
+  weExportSetConfig: (key: string, value: unknown) =>
+    invoke<void>("we_export_set_config", { key, value }),
 };

@@ -419,8 +419,10 @@ function main() {
   log('\n=== 部署助手 ===');
   const cfg = syncConfig(weDir);
   deployRuntime(cfg);
-  startHelper();
-  setupAutostart();
+  // 2026-11-28：助手生命周期改由影匣本体托管（影匣启动时拉起 helper.mjs 并守护，
+  // 死了自动重启），不再装开机自启 / 计划任务，避免两套守护互相打架。
+  removeAutostart();
+  log('助手生命周期已交由影匣托管：影匣运行时自动拉起并守护，面板「壁纸导出」可启停/看日志');
 
   log('\n=== 完成 ===');
   log(`助手运行时: ${RUNTIME}（随影匣安装目录，卸载影匣时连带清理）`);

@@ -348,3 +348,26 @@ export interface OrganizeReport {
   folders: number;
   skipped: string[];
 }
+
+/** 壁纸导出助手状态（Rust we_export::Status 序列化而来） */
+export interface WeExportStatus {
+  alive: boolean;
+  pid: number | null;
+  port: number;
+  node_path: string;
+  script: string;
+  vault_root: string;
+  config: {
+    vaultLibrary?: string;
+    steamLibrary?: string;
+    weRoot?: string;
+    library?: string;
+    projectsRoot?: string;
+    vaultctl?: string;
+    autoScan?: boolean;
+    includePreview?: boolean;
+    nameFrom?: string;
+    node?: string;
+  };
+  logs: string[];
+}

@@ -855,3 +855,30 @@ body.banding, body.banding * { user-select: none; -webkit-user-select: none; }
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: content-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── 壁纸导出助手面板 ── */
+.we-status-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.we-status-sub { margin-top: 8px; font-size: 11.5px; }
+.we-badge {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600;
+  padding: 4px 10px; border-radius: 20px; background: var(--surface-3); color: var(--muted);
+}
+.we-badge.on { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.we-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.we-badge:not(.on) .we-dot { background: var(--muted); }
+.we-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.we-test-result {
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2);
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+  border: 1px solid var(--line); color: var(--text);
+}
+.we-toggles { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.we-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+.we-toggle input { accent-color: var(--accent); }
+.we-logs {
+  max-height: 320px; overflow-y: auto; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+  line-height: 1.7; display: flex; flex-direction: column;
+}
+.we-log-line { color: var(--muted); word-break: break-all; }
+.we-log-line:last-child { color: var(--text); }
