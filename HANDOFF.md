@@ -188,6 +188,7 @@
 17. **本环境回收站通道不可用**：`Add-Type` 与 `[Reflection.Assembly]::LoadWithPartialName` 都被安全策略拦，拿不到 `Microsoft.VisualBasic.FileIO.FileSystem`；`.vbs` 被归为 LOLBin 不许写。删除只能 `Remove-Item -Recurse -Force`，**删前必须自己确认活体 + 备份双份在手**。
 18. `Get-PSDrive` 的 `Free` 有缓存，删完大目录要用 `Get-Volume` 或 `fsutil volume diskfree` 重读。
 19. **改源码位置时，备份三件套必须一起改**：脚本默认参数、自启项、automation 的 prompt + `cwds`。11-27 就因为三处全指着旧路径（E 盘），每日备份静默断流一整轮——脚本报错被 `-Quiet` 吞掉，automation 因 `cwds` 不存在连启动都不启动，两条路都不报警。
+20. **全库扫描会把回收站全部复活**（11-27 发现，commit `9b5d6b3` 已修源码、**未发版**）：`upsert_video` 原来每次扫到同一路径都无条件 `trashed=0`，跑一次「扫描库」就把回收站清空——包括内容去重标记的 59 个副本，去重成果被无声撤销。11-27 上午补接触表时我也踩了一次（活跃 1884→1954）。已改为**只在文件大小/mtime 变化时才清回收站**，未变化的文件尊重用户决定。⚠️ **在修好的版本发出去之前，别在 0.1.27 界面点「扫描库」**，否则回收站会再被清空一次。
 
 ---
 
