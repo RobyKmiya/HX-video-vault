@@ -138,7 +138,9 @@ function writeRunEntry(command) {
 function deleteRunEntry() {
   let r = spawnSync('reg.exe', ['delete', RUN_KEY, '/v', RUN_NAME, '/f'], { encoding: 'utf8', windowsHide: true, timeout: 8000 });
   if (r.status === 0) return true;
-  const ps = `Remove-ItemProperty -Path '${RUN_KEY.replace(/\\/g, '\\\\')}' -Name '${RUN_NAME}' -ErrorAction SilentlyContinue`;
+  // PowerShell 的注册表 PSDrive 要带冒号（HKCU:\），reg.exe 的写法（HKCU\）在 PS 里会被当相对路径
+  const psKey = RUN_KEY.replace(/\\/g, '\\\\').replace(/^HKCU/, 'HKCU:');
+  const ps = `Remove-ItemProperty -Path '${psKey}' -Name '${RUN_NAME}' -ErrorAction SilentlyContinue`;
   r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
     { encoding: 'utf8', windowsHide: true, timeout: 20000 });
   return r.status === 0;
