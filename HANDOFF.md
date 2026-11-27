@@ -199,6 +199,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 18. `Get-PSDrive` 的 `Free` 有缓存，删完大目录要用 `Get-Volume` 或 `fsutil volume diskfree` 重读。
 19. **改源码位置时，备份三件套必须一起改**：脚本默认参数、自启项、automation 的 prompt + `cwds`。11-27 就因为三处全指着旧路径（E 盘），每日备份静默断流一整轮——脚本报错被 `-Quiet` 吞掉，automation 因 `cwds` 不存在连启动都不启动，两条路都不报警。
 20. **全库扫描会把回收站全部复活**（11-27 发现，`9b5d6b3` 修复、**已随 0.1.28 发出**）：`upsert_video` 原来每次扫到同一路径都无条件 `trashed=0`，跑一次「扫描库」就把回收站清空——包括内容去重标记的 59 个副本，去重成果被无声撤销。11-27 上午补接触表时我也踩了一次（活跃 1884→1954）。已改为**只在文件大小/mtime 变化时才清回收站**，未变化的文件尊重用户决定。0.1.28 起可以正常「扫描库」了；0.1.27 及更早版本仍有此问题。
+22. **换了图标桌面还是旧的 = Windows 图标缓存**（11-27）：exe 里图标已换（可用 shell32.ExtractIconExW + DrawIconEx 采样像素验证：四角深色 (28,24,21)、中心橙 (243,113,22)），但桌面仍显示旧图。处理：`ie4uinit.exe -ClearIconCache` + 删 `%LOCALAPPDATA%\IconCache.db` 与 `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db`，再重启 explorer.exe。注意本环境 `Add-Type` 与 `-ComObject` 都被安全策略拦，重写 .lnk 只能靠 explorer 重建缓存。
 21. **库内路径分隔符混写会让扫描把老记录判成丢失**（11-27 踩过，`0.1.31` 已修）：CLI 传 `--library F:/Hthings/Supervideo`（正斜杠）时，整理后写进库的是 `F:/Hthings/Supervideo\1\x.mp4`，而扫描 walk 出来是 `F:\Hthings\Supervideo\1\x.mp4`；`upsert_video` 按原始 `path` 匹配，于是**每条都当新文件再插一遍**，旧行被 `mark_missing` 打进回收站（实测多出 1883 条重复）。修法：整理前把库内 `path` 的 `/` 统一成 `\`，目标路径也按同规则生成。**教训：任何写 `path` 的地方都要与扫描 walk 的写法（反斜杠）保持一致。**
 
 ---
