@@ -30,6 +30,11 @@ pub fn all_stamps(
 }
 /// 按 (path, entry_index) 幂等登记；返回 true 表示新增。
 /// 新记录没带元数据时保留库内已有的元数据（扫描不会把探测结果抹掉）。
+///
+/// 回收站标记只在「文件本身变了」时才清掉：扫描看到同一个路径 ≠ 用户想恢复它。
+/// 以前这里无条件 `trashed=0`，导致每跑一次全库扫描就把回收站（含去重标记的副本）
+/// 全部复活，去重成果被无声撤销。改判据后：内容/时间没变 → 尊重用户的回收站决定；
+/// 文件被替换或重编码 → 视为新内容，正常参与浏览。要主动恢复用 `set_trashed(false)`。
 pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String> {
     let exists: Option<i64> = conn
         .query_row(
@@ -48,7 +53,9 @@ pub fn upsert_video(conn: &Connection, rec: &VideoRecord) -> Result<bool, String
                     height       = CASE WHEN ?8 > 0 THEN ?8 ELSE height END,
                     codec_video  = CASE WHEN ?9 <> '' THEN ?9 ELSE codec_video END,
                     codec_audio  = CASE WHEN ?10 <> '' THEN ?10 ELSE codec_audio END,
-                    entry_count=?11, trashed=0 WHERE id=?1",
+                    entry_count=?11,
+                    trashed = CASE WHEN size_bytes <> ?4 OR mtime <> ?5 THEN 0 ELSE trashed END
+                    WHERE id=?1",
                 params![id, rec.file_name, rec.container, rec.size_bytes, rec.mtime, rec.duration_sec, rec.width, rec.height, rec.codec_video, rec.codec_audio, rec.entry_count],
             ).map_err(|e| e.to_string())?;
             Ok(false)

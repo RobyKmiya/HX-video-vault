@@ -82,6 +82,43 @@
     }
 
     #[test]
+    fn rescan_keeps_trashed_until_file_changes() {
+        let (root, ctx) = temp_lib();
+        upsert_video(&ctx.conn, &rec("D:\\t.mp4", 0)).unwrap();
+        let id: i64 = ctx
+            .conn
+            .query_row("SELECT id FROM videos WHERE path=?1", params!["D:\\t.mp4"], |r| r.get(0))
+            .unwrap();
+        // 用户把它放进回收站（或被去重标记）
+        set_trashed(&ctx.conn, id, true).unwrap();
+
+        // 再扫一次，文件没变 → 不能替用户把它从回收站捞出来
+        upsert_video(&ctx.conn, &rec("D:\\t.mp4", 0)).unwrap();
+        let trashed: i64 = ctx
+            .conn
+            .query_row("SELECT trashed FROM videos WHERE id=?1", params![id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trashed, 1, "文件未变，扫描不应复活回收站条目");
+
+        // 文件真的变了（大小/时间不同）→ 视为新内容，重新参与浏览
+        let mut changed = rec("D:\\t.mp4", 0);
+        changed.size_bytes = 4096;
+        changed.mtime = 200;
+        upsert_video(&ctx.conn, &changed).unwrap();
+        let trashed: i64 = ctx
+            .conn
+            .query_row("SELECT trashed FROM videos WHERE id=?1", params![id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trashed, 0, "文件已变化，应恢复为活跃");
+
+        // 主动恢复仍然有效
+        set_trashed(&ctx.conn, id, true).unwrap();
+        set_trashed(&ctx.conn, id, false).unwrap();
+        drop(ctx);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stamps_flag_unchanged_entries_and_upsert_keeps_meta() {
         let (root, ctx) = temp_lib();
         upsert_video(&ctx.conn, &rec("D:\\c.mp4", 0)).unwrap();
