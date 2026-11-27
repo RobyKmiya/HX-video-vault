@@ -90,8 +90,14 @@ pub fn organize_numbered(lib: &LibraryContext, cap: usize) -> Result<OrganizeRep
         mapped.filter_map(Result::ok).collect()
     };
 
+    // 先把库内混写的 `F:/x\y` 统一成 `F://x//y`，否则和扫描出来的路径对不上
+    let _ = lib
+        .conn
+        .execute("UPDATE videos SET path = REPLACE(path, '/', '\\') WHERE path LIKE '%/%'", []);
+
     let mut moved = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    let root = &PathBuf::from(root.to_string_lossy().replace('/', "\\"));
     let mut folders = 0usize;
     for (idx, (id, path)) in rows.iter().enumerate() {
         let folder = (idx / cap + 1) as i64;
@@ -105,7 +111,9 @@ pub fn organize_numbered(lib: &LibraryContext, cap: usize) -> Result<OrganizeRep
             continue; // 幽灵行交给 purge_missing_trashed
         }
         let dir = root.join(folder.to_string());
-        let dst = dir.join(&name);
+        // 统一反斜杠：库里的路径必须和扫描 walk 出来的写法一致，
+        // 否则 `WHERE path=?` 匹配不上，会把老记录判成丢失、再插一条新记录。
+        let dst = PathBuf::from(dir.join(&name).to_string_lossy().replace('/', "\\"));
         let same = src == dst
             || src
                 .to_string_lossy()
@@ -151,6 +159,9 @@ pub fn organize_numbered(lib: &LibraryContext, cap: usize) -> Result<OrganizeRep
             }
         }
     }
+
+    // 有跳过/重名时编号会漂：最后按「磁盘上的实际夹」重算一遍位置计数，保证唯一且对得上
+    backfill_positions(&lib.conn)?;
 
     Ok(OrganizeReport { moved, folders, skipped })
 }

@@ -101,6 +101,8 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// 整理库：按 200/夹 把视频收进 1、2、3… 号文件夹（不改文件名）
+    Organize,
     /// 批量补预览图（接触表）：只补缺的，已有跳过
     Sheets {
         /// 本轮最多做 N 条（0 = 全做完）
@@ -426,6 +428,11 @@ fn run(cli: &Cli) -> Result<Value, String> {
                     "others": g.others.iter().map(|o| &o.path).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
             }))
+        }
+        Command::Organize => {
+            let ctx = open(cli)?;
+            let report = db::organize_numbered(&ctx, db::FOLDER_CAP)?;
+            Ok(json!({ "ok": true, "action": "organize", "report": report }))
         }
         Command::Sheets { limit, verbose_every } => {
             let ctx = open(cli)?;
