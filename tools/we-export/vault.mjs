@@ -215,8 +215,9 @@ export function importIntoVault(cfg, files) {
 
 /**
  * 后台同步目录集合（collection）。
- * scan --root 传的是库根（全量），seen 覆盖库内全部视频，
- * 所以 mark_missing 不会误伤；全库扫一次约 40 秒，放后台不阻塞用户。
+ * 用 sync-collections 而不是 scan --root：导入新文件已经用 import --paths 登记过了，
+ * 这里只需按库内已有路径重建文件夹集合（纯 SQL，不扫盘），
+ * 否则每导出一批都要把全库 1919 个文件挨个 stat 一遍，白伤盘。
  */
 export function syncVaultInBackground(cfg) {
   const root = resolveVaultRoot(cfg);
@@ -226,7 +227,7 @@ export function syncVaultInBackground(cfg) {
   try {
     fs.mkdirSync(path.dirname(out), { recursive: true });
     const fd = fs.openSync(out, 'a');
-    const child = spawn(exe, ['--library', root, 'scan', '--root', root],
+    const child = spawn(exe, ['--library', root, 'sync-collections'],
       { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
     child.unref();
     try { fs.closeSync(fd); } catch { /* ignore */ }

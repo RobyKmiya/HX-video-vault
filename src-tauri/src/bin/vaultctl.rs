@@ -103,6 +103,8 @@ enum Command {
     },
     /// 整理库：按 200/夹 把视频收进 1、2、3… 号文件夹（不改文件名）
     Organize,
+    /// 只重建目录集合（不扫盘）：导入新文件后快速把新文件挂进对应文件夹集合
+    SyncCollections,
     /// 批量补预览图（接触表）：只补缺的，已有跳过
     Sheets {
         /// 本轮最多做 N 条（0 = 全做完）
@@ -433,6 +435,23 @@ fn run(cli: &Cli) -> Result<Value, String> {
             let ctx = open(cli)?;
             let report = db::organize_numbered(&ctx, db::FOLDER_CAP)?;
             Ok(json!({ "ok": true, "action": "organize", "report": report }))
+        }
+        Command::SyncCollections => {
+            // 不 walk 磁盘：直接按库内已有的视频路径重建文件夹集合。
+            // 导入新文件已经用 `import --paths` 登记过，这里只补「挂进文件夹集合」这一步，
+            // 省掉全库扫描（否则每导出一批都要把 1919 个文件挨个 stat 一遍）。
+            let ctx = open(cli)?;
+            let mut stmt = ctx
+                .conn
+                .prepare("SELECT path FROM videos")
+                .map_err(|e| e.to_string())?;
+            let seen: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect();
+            let folders = db::sync_folder_collections(&ctx.conn, &ctx.root, &seen)?;
+            Ok(json!({ "ok": true, "action": "sync-collections", "folders": folders }))
         }
         Command::Sheets { limit, verbose_every } => {
             let ctx = open(cli)?;
