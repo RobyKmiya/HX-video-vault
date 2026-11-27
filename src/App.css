@@ -797,3 +797,15 @@ body.is-splitting * { cursor: col-resize !important; }
 }
 .dedupe-row .truncate { flex: 1; min-width: 0; }
 .dedupe-row .muted { flex: none; font-size: 11px; }
+
+/* ── 框选（空白处按住拖动）── */
+.band-box {
+  position: fixed;
+  z-index: 80;
+  border: 1px solid var(--accent);
+  background: rgba(79, 70, 229, .13);
+  border-radius: 4px;
+  pointer-events: none;
+}
+/* 框选过程中禁止选中文字/图片，避免拖出蓝色选区 */
+body.banding, body.banding * { user-select: none; -webkit-user-select: none; }

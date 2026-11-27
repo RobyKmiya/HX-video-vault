@@ -20,6 +20,7 @@ import { api } from "./api";
 import { prewarmCovers, resetCovers } from "./cover";
 import { formatBytes } from "./format";
 import { usePersistentSize } from "./layout";
+import { rangeSelection, rectFromPoints, rectsIntersect } from "./selection";
 import { loadGestures, type GestureMap } from "./gestures";
 import { loadKeyMap, comboFromEvent, actionForCombo, type ActionId, type KeyMap } from "./shortcuts";
 import type {
@@ -176,6 +177,15 @@ export default function App() {
   // 导入结束只处理一次（防同一批完成事件重复触发扫描）
   const importFinishedRef = useRef(true);
   const doScanRef = useRef<() => void>(() => {});
+  /** Shift 区间选择的锚点（上一次点中的卡片） */
+  const anchorRef = useRef<number | null>(null);
+  /** Ctrl+A 全选（供 keydown 用，避免把大依赖塞进事件监听） */
+  const selectAllRef = useRef<() => void>(() => {});
+  /** 框选：按下时的起点/基准选中集 */
+  const bandStartRef = useRef<{ x: number; y: number; moved: boolean; additive: boolean } | null>(null);
+  const bandBaseRef = useRef<Set<number>>(new Set());
+  const [bandActive, setBandActive] = useState(false);
+  const [bandRect, setBandRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   const notify = useCallback((msg: string, kind: ToastKind = "info") => {
     setToast({ id: Date.now(), message: msg, kind });
@@ -483,7 +493,16 @@ export default function App() {
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       if (e.key === "/") { e.preventDefault(); searchRef.current?.focus(); }
-      if (e.key === "Escape") { setDetailId(null); setStatsOpen(false); setTagsOpen(false); setBulkTagOpen(false); }
+      // Ctrl+A：全选当前筛选下的所有条目（不只是已加载的一屏）
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        selectAllRef.current();
+        return;
+      }
+      if (e.key === "Escape") {
+        setDetailId(null); setStatsOpen(false); setTagsOpen(false); setBulkTagOpen(false);
+        setSelected(new Set());
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -648,18 +667,50 @@ export default function App() {
       ? `${SCAN_PHASE[scanProgress.phase]} ${scanProgress.done}/${scanProgress.total}`
       : "扫描中…";
 
+  /** 当前列表顺序（Shift 区间选择按它算，不含还没加载的页） */
+  const orderIds = useMemo(() => videoPage.items.map((v) => v.id), [videoPage.items]);
+
+  // 选择语义对齐 Windows 资源管理器：单击=单选、Ctrl=切换单条、Shift=从锚点连选、空白拖拽=框选
   const selectOne = (video: VideoItem, ev: ReactMouseEvent) => {
+    const additive = ev.ctrlKey || ev.metaKey;
+    const ranged = ev.shiftKey;
     setSelected((prev) => {
-      const next = new Set(prev);
-      if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
-        if (next.has(video.id)) next.delete(video.id); else next.add(video.id);
-      } else {
-        next.clear(); next.add(video.id);
+      if (ranged) {
+        const ids = rangeSelection(orderIds, anchorRef.current, video.id);
+        const next = additive ? new Set(prev) : new Set<number>();
+        for (const id of ids) next.add(id);
+        return next;
       }
-      return next;
+      if (additive) {
+        const next = new Set(prev);
+        if (next.has(video.id)) next.delete(video.id);
+        else next.add(video.id);
+        return next;
+      }
+      return new Set([video.id]);
     });
-    if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) setDetailId(video.id);
+    anchorRef.current = video.id;
+    if (!additive && !ranged) setDetailId(video.id);
   };
+
+  // 全选：按当前筛选与排序选中**所有**匹配条目（不只已加载的那一屏）
+  const selectAll = useCallback(async () => {
+    try {
+      const ids: number[] = [];
+      for (let p = 1; p <= 50; p++) {
+        const r = await api.query({
+          view, search: debouncedSearch || undefined, tag: activeTag ?? undefined,
+          collection: activeCollection ?? undefined, sort: sortParam, page: p, page_size: 200,
+        });
+        ids.push(...r.items.map((v) => v.id));
+        if (ids.length >= r.total || r.items.length === 0) break;
+      }
+      if (!ids.length) return;
+      setSelected(new Set(ids));
+      notify(`已全选 ${ids.length} 条`);
+    } catch (e) { notify(String(e), "error"); }
+  }, [view, debouncedSearch, activeTag, activeCollection, sortParam, notify]);
+  selectAllRef.current = () => { void selectAll(); };
 
   // 库内回收站：只改库标记，磁盘文件不动；二次确认后才执行
   const trashIds = async (ids: number[]) => {
@@ -680,10 +731,12 @@ export default function App() {
     if (!ids.length) return;
     const picked = videoPage.items.filter((v) => ids.includes(v.id));
     const bytes = picked.reduce((sum, v) => sum + v.size_bytes, 0);
+    // 全选可能包含还没加载的条目，这时算不出准确总大小，就不硬报一个假数字
+    const sizeText = picked.length === ids.length ? `共 ${formatBytes(bytes)}，` : "";
     const preview = picked.slice(0, 3).map((v) => `「${v.file_name}」`).join("");
-    const more = picked.length > 3 ? ` 等 ${picked.length} 个` : "";
+    const more = ids.length > 3 ? ` 等 ${ids.length} 个` : "";
     if (!window.confirm(
-      `彻底删除 ${ids.length} 个视频？\n${preview}${more}\n\n共 ${formatBytes(bytes)}，磁盘上的文件会一起删除，删除后无法恢复。`
+      `彻底删除 ${ids.length} 个视频？\n${preview}${more}\n\n${sizeText}磁盘上的文件会一起删除，删除后无法恢复。`
     )) return;
     try {
       const report = await api.purgeVideos(ids);
@@ -897,6 +950,58 @@ export default function App() {
     return () => main.removeEventListener("wheel", onWheel);
   }, [applyZoom, ready]);
 
+  // 空白处按住拖动 = 框选（Windows 资源管理器同款）：拖到视口上下边缘会自动滚动
+  useEffect(() => {
+    if (!bandActive) return;
+    const start = bandStartRef.current;
+    if (!start) return;
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (!start.moved && Math.hypot(dx, dy) > 4) start.moved = true;
+      setBandRect({ x0: start.x, y0: start.y, x1: e.clientX, y1: e.clientY });
+      if (!start.moved) return;
+      const grid = gridRef.current;
+      const main = mainRef.current;
+      if (!grid) return;
+      const box = rectFromPoints(start.x, start.y, e.clientX, e.clientY);
+      const hit: number[] = [];
+      grid.querySelectorAll<HTMLElement>("[data-video-id]").forEach((node) => {
+        const r = node.getBoundingClientRect();
+        if (rectsIntersect(box, { left: r.left, top: r.top, right: r.right, bottom: r.bottom })) {
+          const id = Number(node.getAttribute("data-video-id"));
+          if (Number.isFinite(id)) hit.push(id);
+        }
+      });
+      // Ctrl 框选 = 在原有选择上追加；普通框选 = 只保留框中的
+      setSelected(new Set([...bandBaseRef.current, ...hit]));
+      if (main) {
+        const mr = main.getBoundingClientRect();
+        if (e.clientY > mr.bottom - 56) main.scrollTop += 22;
+        else if (e.clientY < mr.top + 56) main.scrollTop -= 22;
+      }
+    };
+    const onUp = () => {
+      // 只是点了一下空白处（没拖动）→ 清空选择，跟资源管理器一致
+      if (start && !start.moved && !start.additive) setSelected(new Set());
+      setBandActive(false);
+      setBandRect(null);
+      bandStartRef.current = null;
+      bandBaseRef.current = new Set();
+      document.body.classList.remove("banding");
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    // 切走窗口（Alt+Tab）时收不到 mouseup，兜底收尾，别让遮罩卡在屏幕上
+    window.addEventListener("blur", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
+      document.body.classList.remove("banding");
+    };
+  }, [bandActive]);
+
   // 「最近入库」首屏后台预热：错开 180ms 串行抽帧，不让新片卡在占位图上
   useEffect(() => {
     if (!ready || !info || view !== "latest") return;
@@ -1029,6 +1134,9 @@ export default function App() {
                 title={sortRev ? "当前：逆序（点一下改成正序）" : "当前：正序（点一下改成逆序）"}
               >
                 <Icon name="sortDir" size={16} />
+              </button>
+              <button className="btn" onClick={() => void selectAll()} title="全选当前筛选下的所有视频（Ctrl+A）；也可在空白处拖拽框选、Shift 连选">
+                全选
               </button>
               <button className="btn" onClick={doScan} disabled={scanning} title="增量扫描：已登记且没变过的文件不会再跑 ffprobe">
                 <Icon name="refresh" size={16} className={scanning ? "spin" : ""} />{scanLabel}
@@ -1254,6 +1362,18 @@ export default function App() {
                   className="video-grid"
                   ref={gridRef}
                   style={{ "--card-min": `${cardMin}px`, "--grid-gap": `${gridGap}px` } as CSSProperties}
+                  onMouseDown={(e) => {
+                    // 只在空白处起手：卡片自己的点击/拖拽不受影响
+                    if (e.button !== 0) return;
+                    if ((e.target as HTMLElement).closest("[data-video-id]")) return;
+                    e.preventDefault();
+                    const additive = e.ctrlKey || e.metaKey;
+                    bandStartRef.current = { x: e.clientX, y: e.clientY, moved: false, additive };
+                    bandBaseRef.current = additive ? new Set(selected) : new Set();
+                    setBandRect({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY });
+                    setBandActive(true);
+                    document.body.classList.add("banding");
+                  }}
                   onContextMenu={(e) => {
                     const el = (e.target as HTMLElement).closest("[data-video-id]");
                     if (!el) return;
@@ -1481,6 +1601,18 @@ export default function App() {
           status={importer}
           onCancel={() => { void api.cancelImport().catch((e) => notify(String(e))); }}
           onClose={() => setImporter(null)}
+        />
+      )}
+
+      {bandRect && (
+        <div
+          className="band-box"
+          style={{
+            left: Math.min(bandRect.x0, bandRect.x1),
+            top: Math.min(bandRect.y0, bandRect.y1),
+            width: Math.abs(bandRect.x1 - bandRect.x0),
+            height: Math.abs(bandRect.y1 - bandRect.y0),
+          }}
         />
       )}
 
