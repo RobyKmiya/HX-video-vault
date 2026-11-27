@@ -212,10 +212,9 @@ export default function App() {
   const bandStartRef = useRef<{ x: number; y: number; moved: boolean; additive: boolean } | null>(null);
   const bandBaseRef = useRef<Set<number>>(new Set());
   const [bandActive, setBandActive] = useState(false);
-  /** 彻底删除前的站内确认（不用 window.confirm：原生框默认按钮是「确定」，
-      用空格/回车点按钮时同一次按键会把弹框一起确认掉，等于没确认就删了） */
-  const [purgeAsk, setPurgeAsk] = useState<{ ids: number[]; bytes: number; names: string[]; total: number } | null>(null);
-  const [purgeAgreed, setPurgeAgreed] = useState(false);
+  /** 彻底删除：一个按钮按两次才执行（第一次进入「再点一次确认」态，几秒不点自动取消） */
+  const [purgeArmed, setPurgeArmed] = useState(false);
+  const purgeTimerRef = useRef<number | null>(null);
   const purgingRef = useRef(false);
   const [bandRect, setBandRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -772,10 +771,9 @@ export default function App() {
   }, [view, debouncedSearch, activeTag, activeCollection, sortParam, notify]);
   selectAllRef.current = () => { void selectAll(); };
 
-  // 库内回收站：只改库标记，磁盘文件不动；二次确认后才执行
+  // 库内回收站：只改库标记，磁盘文件不动；移入不提示（回收站里可「恢复」反悔）
   const trashIds = async (ids: number[]) => {
     if (!ids.length) return;
-    if (!window.confirm(`把 ${ids.length} 条移入影匣回收站？\n磁盘上的文件不会被删除。`)) return;
     try {
       for (const id of ids) await api.trash(id, true);
       notify(`已移入回收站 ${ids.length} 条（文件原样保留）`);
@@ -786,27 +784,22 @@ export default function App() {
     } catch (e) { notify(String(e)); }
   };
 
-  // 彻底删除：连磁盘文件一起删，不可恢复。只对回收站里的条目开放（后端还会再校验一次）
+  // 彻底删除：连磁盘文件一起删，不可恢复。只对回收站里的条目开放（后端还会再校验一次）。
+  // 一个按钮按两次：第一次进入「再点一次确认」态，几秒不点自动取消。
   const purgeIds = async (ids: number[]) => {
     if (!ids.length || purgingRef.current) return;
-    const picked = videoPage.items.filter((v) => ids.includes(v.id));
-    const bytes = picked.reduce((sum, v) => sum + v.size_bytes, 0);
-    setPurgeAgreed(false);
-    setPurgeAsk({
-      ids,
-      bytes,
-      names: picked.slice(0, 3).map((v) => v.file_name),
-      total: ids.length,
-    });
-  };
-
-  /** 确认框里点了「彻底删除」才真正执行 */
-  const purgeNow = async () => {
-    const ask = purgeAsk;
-    if (!ask || purgingRef.current) return;
+    if (!purgeArmed) {
+      setPurgeArmed(true);
+      if (purgeTimerRef.current) window.clearTimeout(purgeTimerRef.current);
+      purgeTimerRef.current = window.setTimeout(() => setPurgeArmed(false), 4000);
+      return;
+    }
+    if (purgeTimerRef.current) window.clearTimeout(purgeTimerRef.current);
+    purgeTimerRef.current = null;
+    setPurgeArmed(false);
     purgingRef.current = true;
     try {
-      const report = await api.purgeVideos(ask.ids);
+      const report = await api.purgeVideos(ids);
       if (report.failed.length) console.warn("彻底删除跳过的条目：", report.failed);
       const skipped = report.failed.length ? `，${report.failed.length} 条被跳过` : "";
       notify(
@@ -821,8 +814,6 @@ export default function App() {
       notify(String(e), "error");
     } finally {
       purgingRef.current = false;
-      setPurgeAsk(null);
-      setPurgeAgreed(false);
     }
   };
 
@@ -1352,7 +1343,7 @@ export default function App() {
                       } catch (e) { notify(String(e), "error"); }
                     }}><Icon name="check" size={14} />恢复</button>
                     <button className="btn small danger" onClick={() => void purgeIds([...selected])}>
-                      <Icon name="trash" size={14} />彻底删除（{selected.size}）
+                      <Icon name="trash" size={14} />{purgeArmed ? "再点一次确认" : `彻底删除（${selected.size}）`}
                     </button>
                     <span className="muted">彻底删除会连磁盘文件一起删掉，不可恢复</span>
                   </>
@@ -1572,7 +1563,7 @@ export default function App() {
               } catch (e) { notify(String(e)); } finally { setMenuBusy(false); }
             }}><Icon name="zip" size={14} />{menuBusy ? "压缩中…" : "压缩为 zip（保留原文件）"}</button>
             {view === "trash" ? (
-              <button className="danger" onClick={() => void purgeIds(menu.ids)}><Icon name="trash" size={14} />彻底删除（不可恢复）</button>
+              <button className="danger" onClick={() => void purgeIds(menu.ids)}><Icon name="trash" size={14} />{purgeArmed ? "再点一次确认" : "彻底删除（不可恢复）"}</button>
             ) : (
               <button className="danger" onClick={() => runAction("edit.trash")}><Icon name="trash" size={14} />移入影匣回收站</button>
             )}
@@ -1687,48 +1678,6 @@ export default function App() {
             height: Math.abs(bandRect.y1 - bandRect.y0),
           }}
         />
-      )}
-
-      {purgeAsk && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={() => { setPurgeAsk(null); setPurgeAgreed(false); }}
-        >
-          <div className="modal purge-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="panel-head">
-              <div>
-                <h1>彻底删除 {purgeAsk.total} 个视频？</h1>
-                <p>磁盘上的文件会一起删除，不可恢复</p>
-              </div>
-              <button className="icon-btn" onClick={() => { setPurgeAsk(null); setPurgeAgreed(false); }}>
-                <Icon name="x" size={18} />
-              </button>
-            </div>
-            <div className="modal-body">
-              <ul className="purge-list">
-                {purgeAsk.names.map((n) => <li key={n} className="truncate" title={n}>{n}</li>)}
-              </ul>
-              {purgeAsk.total > purgeAsk.names.length && (
-                <p className="muted">…等共 {purgeAsk.total} 个</p>
-              )}
-              {purgeAsk.bytes > 0 && <p className="muted">合计 {formatBytes(purgeAsk.bytes)}</p>}
-              <label className="purge-agree">
-                <input
-                  type="checkbox"
-                  checked={purgeAgreed}
-                  onChange={(e) => setPurgeAgreed(e.target.checked)}
-                />
-                <span>我已确认：这些文件会从磁盘删除，无法恢复</span>
-              </label>
-            </div>
-            <div className="purge-foot">
-              <button className="btn" onClick={() => { setPurgeAsk(null); setPurgeAgreed(false); }}>取消</button>
-              <button className="btn danger" disabled={!purgeAgreed} onClick={() => void purgeNow()}>
-                <Icon name="trash" size={14} />彻底删除
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {toast && <Toast toast={toast} onClose={() => setToast(null)} />}

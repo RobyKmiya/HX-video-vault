@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icons";
 import { MoveDialog } from "./MoveDialog";
@@ -58,6 +58,9 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [opBusy, setOpBusy] = useState(false);
+  // 彻底删除「按两次」：避免原生 confirm 的误确认
+  const [purgeArmed, setPurgeArmed] = useState(false);
+  const purgeTimerRef = useRef<number | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [mode, setMode] = useState<DrawerMode>(readMode);
   const [width, setWidth] = useState<number>(readWidth);
@@ -547,19 +550,27 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
           {video.trashed && (
             <button
               className="btn danger full"
-              onClick={async () => {
-                if (!window.confirm(
-                  `彻底删除「${video.file_name}」？\n\n磁盘上的文件会一起删除，删除后无法恢复。`
-                )) return;
-                try {
-                  const r = await api.purgeVideos([video.id]);
-                  if (r.deleted === 0) throw new Error(r.failed[0] ?? "删除失败");
-                  onChanged();
-                  onClose();
-                } catch (e) { onError(String(e)); }
+              onClick={() => {
+                if (!purgeArmed) {
+                  setPurgeArmed(true);
+                  if (purgeTimerRef.current) window.clearTimeout(purgeTimerRef.current);
+                  purgeTimerRef.current = window.setTimeout(() => setPurgeArmed(false), 4000);
+                  return;
+                }
+                if (purgeTimerRef.current) window.clearTimeout(purgeTimerRef.current);
+                purgeTimerRef.current = null;
+                setPurgeArmed(false);
+                void (async () => {
+                  try {
+                    const r = await api.purgeVideos([video.id]);
+                    if (r.deleted === 0) throw new Error(r.failed[0] ?? "删除失败");
+                    onChanged();
+                    onClose();
+                  } catch (e) { onError(String(e)); }
+                })();
               }}
             >
-              <Icon name="x" size={15} />彻底删除（连磁盘文件）
+              <Icon name="x" size={15} />{purgeArmed ? "再点一次确认删除" : "彻底删除（连磁盘文件）"}
             </button>
           )}
           <p className="hint">
