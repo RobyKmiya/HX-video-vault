@@ -18,7 +18,7 @@
 源码自动备份、视频网格缩放、**内容查重**（v7 迁移 + blake3 指纹，实测 57 组 / 35 GB，
 59 个副本进回收站，剩余重复组 0）。
 
-**没有半截功能。** 剩下的全是"需要人工点一遍"的实机验收项，和几件明确排期外的事（接触表补满、mpv 联调、hanime 插件）。
+**没有半截功能。** 剩下的全是"需要人工点一遍"的实机验收项，和几件明确排期外的事（mpv 联调、hanime 插件）。接触表已于 11-27 上午用 `vaultctl sheets` 补满（1884/1884，0 失败）。
 2026-11-27 03:58 起 `lib.rs` 已从 1893 行拆到 383 行：81 个命令按领域搬到 `src-tauri/src/commands/` 下 12 个子模块；04:30 起 `db.rs` 从 2876 行拆到 272 行：共享类型/helper 留原处，54 个业务函数 + 19 个测试搬到 `src-tauri/src/db/` 下 10 个子模块，`crate::db::xxx` 调用路径不变。04:40 起 `App.tsx` 从 1951 行拆到 1446 行：5 个独立子组件（BootSplash/ImportHud/SettingsModal/SheetPanel/CollectionManager）搬到 `src/components/`，正文逐字节一致。三批都是纯结构重构未发版，exe 仍是 0.1.27。
 
 **当前唯一源码 = `D:\VideoVault`**（内置盘）。E 盘源码副本已于 11-27 03:15 全部清空 —— E 盘是外置 USB NVMe，
@@ -143,7 +143,7 @@
 **A. 需要管理员配合的（我做不了）**
 
 1. **上传 GitHub**（管理员已定：后续云端备份走 GitHub）——仓库已就绪：91 个跟踪文件 / 1.7 MB，`.gitignore` 挡住 `target`/`node_modules`/`dist`/`*.db`/`*.db-shm`/`*.db-wal`/`tools/we-export/config.json`。建库后 `git remote add origin <url>` + `git push -u origin master`。**传成功之前，容灾只剩本地 `D:\VideoVault-backups` 一份（2.2 MB），别无副本。**
-2. **接触表补满**：还缺 1,204 条（683/1,887）。单个 `contact_sheet` 要线性解码整片（18 秒/条），全量约 6 小时；`vaultctl sheets` 3 worker 可压到 2 小时。**需要先关掉影匣**（GUI 独占库）。跑完大夹首次打开的抽帧排队会明显缓解。
+2. ~~**接触表补满**~~ ✅ **已完成（2026-11-27 10:35）**：`vaultctl sheets` 后台一轮跑完 1178 条、0 失败，全库 1884/1884 满覆盖（10:40 实测 SQLite 只读查询核对）。
 3. **历史 P0 实机验收**（第七节清单），全部只差人工点一遍。
 
 **B. 待排期功能**
