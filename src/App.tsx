@@ -51,6 +51,7 @@ type NavLoc = { view: ViewKey; folder: string[]; tag: string | null; coll: strin
 const SORTS = [
   { key: "folder", label: "文件夹" },
   { key: "added", label: "最近加入" },
+  { key: "import", label: "导入顺序" },
   { key: "mtime", label: "文件修改时间" },
   { key: "watched", label: "最近观看" },
   { key: "title", label: "文件名" },

@@ -518,6 +518,12 @@ export function DetailDrawer({ video, tags, collections, onClose, onPlay, onEdit
             <div><dt>加入时间</dt><dd>{formatDate(video.added_at)}</dd></div>
             <div><dt>导入计数</dt><dd>{video.import_seq > 0 ? `第 ${video.import_seq.toLocaleString()} 个导入` : "—"}</dd></div>
             <div><dt>位置计数</dt><dd>{video.folder_no > 0 ? `第 ${video.folder_no} 号夹 · 第 ${video.slot_no} 条（全局第 ${(video.folder_no - 1) * 200 + video.slot_no} 位）` : "—"}</dd></div>
+            {video.source_url && (
+              <div><dt>原视频链接</dt><dd className="truncate" title={video.source_url}>
+                <a href={video.source_url} target="_blank" rel="noreferrer">{video.source_url}</a>
+              </dd></div>
+            )}
+            {video.source_author && <div><dt>原作者</dt><dd>{video.source_author}{video.source_site ? ` · ${video.source_site}` : ""}</dd></div>}
             <div><dt>导入/位置差</dt><dd>{(() => {
               if (video.import_seq <= 0 || video.folder_no <= 0) return "—";
               const diff = video.import_seq - ((video.folder_no - 1) * 200 + video.slot_no);

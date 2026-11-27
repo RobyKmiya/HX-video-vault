@@ -12,7 +12,7 @@ use crate::models::{
 
 
 // ── 共享类型 / 常量 / helper（被多个领域引用，留在此处）──
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// 与 `video` 表一一对应的写入载荷（不带 id / 标签）。
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl LibraryContext {
     }
 }
 
-const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, tag_text, (SELECT path FROM video_covers vc WHERE vc.video_id = v.id) AS cover, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.deleted_at=0) AS collections";
+const VIDEO_COLUMNS: &str = "id, path, file_name, container, size_bytes, mtime, duration_sec, width, height, codec_video, codec_audio, entry_index, entry_count, added_at, last_watched_at, watch_count, progress_sec, completed, rating, note, favorite, trashed, contact_sheet, import_seq, folder_no, slot_no, source_url, source_author, source_site, tag_text, (SELECT path FROM video_covers vc WHERE vc.video_id = v.id) AS cover, (SELECT GROUP_CONCAT(c.name, char(31)) FROM collection_videos cv JOIN collections c ON c.id=cv.collection_id WHERE cv.video_id=v.id AND c.deleted_at=0) AS collections";
 
 pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -115,6 +115,12 @@ pub(crate) fn map_video(row: &Row<'_>) -> rusqlite::Result<VideoItem> {
         favorite: row.get::<_, i64>("favorite")? != 0,
         trashed: row.get::<_, i64>("trashed")? != 0,
         contact_sheet: row.get("contact_sheet")?,
+        import_seq: row.get("import_seq")?,
+        folder_no: row.get("folder_no")?,
+        slot_no: row.get("slot_no")?,
+        source_url: row.get("source_url")?,
+        source_author: row.get("source_author")?,
+        source_site: row.get("source_site")?,
         // LEFT JOIN 没命中时是 NULL，走 Option 再落成空串
         cover: row.get::<_, Option<String>>("cover")?.unwrap_or_default(),
         tag_text,
@@ -269,6 +275,8 @@ pub(crate) mod downloads;
 pub use downloads::*;
 pub(crate) mod organize;
 pub use organize::*;
+pub(crate) mod hooks;
+pub use hooks::*;
 
 #[cfg(test)]
 mod tests;

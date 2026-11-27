@@ -23,6 +23,10 @@ export interface VideoItem {
   trashed: boolean;
   /** 导入计数：第几个被导入的视频（全局递增） */
   import_seq: number;
+  /** 网页收藏带过来的出处（空 = 本地文件） */
+  source_url: string;
+  source_author: string;
+  source_site: string;
   /** 位置计数：第几号文件夹 / 夹内第几条 */
   folder_no: number;
   slot_no: number;

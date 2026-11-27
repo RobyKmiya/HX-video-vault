@@ -987,3 +987,46 @@ fn new_videos_get_monotonic_import_seq_without_reuse() {
     drop(ctx);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn web_hook_attaches_source_and_tags_on_title_match() {
+    let (root, ctx) = temp_lib();
+    let mut r = rec("D:////clip.mp4", 0);
+    r.file_name = "My Awesome Clip.mp4".into();
+    upsert_video(&ctx.conn, &r).unwrap();
+
+    let (_, dup) = submit_hook(
+        &ctx.conn,
+        "https://example.com/watch/1",
+        "My Awesome Clip",
+        "某作者",
+        "example.com",
+        "MMD, 原神",
+        "来自网页",
+    )
+    .unwrap();
+    assert!(dup.is_none(), "第一次提交不应判重");
+
+    assert_eq!(apply_pending_hooks(&ctx.conn).unwrap(), 1, "标题能对上就该挂上");
+    let v = query_videos(&ctx.conn, &VideoQuery::default()).unwrap().items.remove(0);
+    assert_eq!(v.source_url, "https://example.com/watch/1");
+    assert_eq!(v.source_author, "某作者");
+    assert_eq!(v.note, "来自网页");
+    assert!(v.tags.contains(&"MMD".to_string()) && v.tags.contains(&"原神".to_string()));
+
+    // 再提交同一出处：应判重并返回已有视频 id
+    let (_, dup2) = submit_hook(
+        &ctx.conn,
+        "https://example.com/watch/1",
+        "My Awesome Clip",
+        "某作者",
+        "example.com",
+        "",
+        "",
+    )
+    .unwrap();
+    assert_eq!(dup2, Some(v.id), "同一出处应能查出已入库的视频");
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(root);
+}

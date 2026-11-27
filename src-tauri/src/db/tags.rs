@@ -1,7 +1,7 @@
 //! `tags` 数据库操作，从 db.rs 拆出；逻辑未改。
 use super::*;
 
-fn refresh_tag_text(conn: &Connection, video_id: i64) -> Result<(), String> {
+pub fn refresh_tag_text(conn: &Connection, video_id: i64) -> Result<(), String> {
     conn.execute(
         "UPDATE videos SET tag_text=COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM video_tags vt JOIN tags t ON t.id=vt.tag_id WHERE vt.video_id=?1), '') WHERE id=?1",
         params![video_id],

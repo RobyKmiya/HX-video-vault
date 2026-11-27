@@ -250,6 +250,12 @@ pub(crate) async fn scan(
             report.missing = db::mark_missing(&lib.conn, &seen).unwrap_or(0);
             report.folders = db::sync_folder_collections(&lib.conn, &root, &seen).unwrap_or(0);
         }
+        // 扫描完把油猴脚本提交的网页元数据挂到新入库的文件上（按标题匹配）
+        if let Ok(guard) = state.lock() {
+            if let Ok(lib) = library(&guard) {
+                let _ = db::apply_pending_hooks(&lib.conn);
+            }
+        }
         report.reused = reused;
         let _ = app.emit(
             "scan-progress",

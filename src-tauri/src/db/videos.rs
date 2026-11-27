@@ -125,7 +125,7 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
     // 无前缀 = 各键的既有默认方向（added/size/watched/count/duration/rating/mtime 新近在前，
     // title/manual 升序）；- 前缀取反。老调用不传前缀，行为与历史版本一致。
     let raw_sort = q.sort.as_deref().unwrap_or("added").to_string();
-    let default_desc = !matches!(raw_sort.trim_start_matches('-'), "title" | "manual");
+    let default_desc = !matches!(raw_sort.trim_start_matches('-'), "title" | "manual" | "import");
     let (key, desc) = match raw_sort.strip_prefix('-') {
         Some(k) => (k.to_string(), !default_desc),
         None => (raw_sort, default_desc),
@@ -144,6 +144,7 @@ pub fn query_videos(conn: &Connection, q: &VideoQuery) -> Result<VideoPage, Stri
                 added_order(desc)
             }
         }
+        "import" => format!("v.import_seq {}", if desc { "DESC" } else { "ASC" }),
         "title" => format!("v.file_name COLLATE NOCASE {}", if desc { "DESC" } else { "ASC" }),
         "folder" => format!("v.path COLLATE NOCASE {}", if desc { "DESC" } else { "ASC" }),
         "size" => format!("v.size_bytes {}", if desc { "DESC" } else { "ASC" }),

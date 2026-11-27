@@ -8,6 +8,7 @@ pub mod models;
 mod mpv;
 pub mod player;
 mod proc;
+pub(crate) mod bridge;
 pub(crate) mod commands;
 
 use std::fs;
@@ -192,6 +193,16 @@ fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// 给本地桥用：拿库执行一段操作（桥在线程里跑，不能直接摸 AppState 内部）
+pub(crate) fn with_library<T>(
+    state: &AppState,
+    f: impl FnOnce(&LibraryContext) -> Result<T, String>,
+) -> Result<T, String> {
+    let ctx = state.inner_lock()?;
+    let lib = library(&ctx)?;
+    f(lib)
+}
+
 fn library(ctx: &AppInner) -> Result<&LibraryContext, String> {
     ctx.library
         .as_ref()
@@ -283,6 +294,10 @@ pub fn run() {
         .setup(|app| {
             let state = AppState::new(app.handle());
             app.manage(state);
+            // 浏览器油猴脚本用的本地桥（只监听 127.0.0.1，端口占用就静默放弃）
+            if let Some(st) = app.try_state::<AppState>() {
+                crate::bridge::spawn(st.inner().clone());
+            }
             // 启动后后台整理一次：浏览器常把新视频直接下到库根/老夹里，收进编号夹再浏览不容易卡。
             // 先做便宜判断，没东西可整就完全不碰库。
             {
@@ -297,6 +312,7 @@ pub fn run() {
                         return;
                     }
                     if let Ok(report) = db::organize_numbered(lib, db::FOLDER_CAP) {
+                        let _ = db::apply_pending_hooks(&lib.conn);
                         if report.moved > 0 {
                             let _ = handle.emit("library-organized", report.moved);
                         }

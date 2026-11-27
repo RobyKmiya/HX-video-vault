@@ -158,6 +158,10 @@ CREATE TABLE IF NOT EXISTS videos (
   -- 位置计数：第几号文件夹（1,2,3…）、夹内第几条（1..200）
   folder_no INTEGER NOT NULL DEFAULT 0,
   slot_no INTEGER NOT NULL DEFAULT 0,
+  -- 网页收藏时带过来的出处信息（油猴脚本写入，空 = 本地文件）
+  source_url TEXT NOT NULL DEFAULT '',
+  source_author TEXT NOT NULL DEFAULT '',
+  source_site TEXT NOT NULL DEFAULT '',
   UNIQUE(path, entry_index)
 );
 CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(path);
@@ -166,6 +170,19 @@ CREATE INDEX IF NOT EXISTS idx_videos_watched ON videos(last_watched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_videos_size ON videos(size_bytes DESC);
 -- 注意：fingerprint 的索引不能放这里。老库的 videos 表已存在、可能还没有这一列，
 -- 批次里建索引会直接报 no such column。放到 v7 迁移补完列之后再建。
+
+-- 浏览器油猴脚本提交的「待入库」元数据：先存着，等文件真的进了库再挂上去
+CREATE TABLE IF NOT EXISTS web_hooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  url TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '',
+  site TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  applied_video_id INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +369,25 @@ CREATE TABLE IF NOT EXISTS download_tasks (
         .map_err(|e| e.to_string())?;
         backfill_positions(conn)?;
         conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_videos_import_seq ON videos(import_seq)")
+            .map_err(|e| e.to_string())?;
+    }
+    // v8 → v9：出处字段（网页收藏）＋ web_hooks 待入库表
+    if version < 9 {
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(videos)").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for (name, ddl) in [
+            ("source_url", "ALTER TABLE videos ADD COLUMN source_url TEXT NOT NULL DEFAULT ''"),
+            ("source_author", "ALTER TABLE videos ADD COLUMN source_author TEXT NOT NULL DEFAULT ''"),
+            ("source_site", "ALTER TABLE videos ADD COLUMN source_site TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !cols.iter().any(|c| c == name) {
+                conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+            }
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_videos_source_url ON videos(source_url)")
             .map_err(|e| e.to_string())?;
     }
     if version < SCHEMA_VERSION {

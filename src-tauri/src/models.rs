@@ -30,6 +30,15 @@ pub struct VideoItem {
     pub trashed: bool,
     /// 接触表相对路径（真空白表示尚未生成）
     pub contact_sheet: String,
+    /// 导入计数：第几个被收进影匣（只增不改）
+    pub import_seq: i64,
+    /// 位置计数：第几号夹 / 夹内第几条（随整理变动）
+    pub folder_no: i64,
+    pub slot_no: i64,
+    /// 网页收藏带过来的出处（空 = 本地文件）
+    pub source_url: String,
+    pub source_author: String,
+    pub source_site: String,
     /// 用户自选封面路径（优先于接触表展示；空 = 未自选，回退接触表/中间帧）
     pub cover: String,
     /// 冗余的「原文 + 译名」标签串，供搜索
