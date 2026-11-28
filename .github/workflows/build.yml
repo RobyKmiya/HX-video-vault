@@ -6,6 +6,11 @@ on:
   push:
     tags: ["v*"]
 
+# softprops/action-gh-release 需要 contents:write；曾因默认只读权限在
+# “发布到 GitHub Release” 步骤报 Resource not accessible by integration（run 46129131771）
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
