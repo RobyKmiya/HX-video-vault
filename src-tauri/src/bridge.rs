@@ -117,19 +117,44 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
                     } else {
                         let st = state.clone();
                         std::thread::spawn(move || {
-                            if let Ok(rep) = crate::downloader::resolve(&url) {
-                                if let Some(best) = rep.candidates.iter().find(|c| c.kind == "video") {
-                                    let t = if title.is_empty() { rep.title.clone() } else { title };
-                                    let best_url = best.url.clone();
-                                    let queued = crate::with_library(&st, |lib| {
-                                        crate::db::create_download(&lib.conn, &best_url, &t, &rep.site, "", &tags)
-                                    });
-                                    if queued.is_ok() {
-                                        if let (Some(app), Ok(root)) = (APP.get(), st.library_path()) {
-                                            crate::downloader::run_queue(app.clone(), root, 50);
+                            match crate::downloader::resolve(&url) {
+                                Ok(rep) => {
+                                    if let Some(best) = rep.candidates.iter().find(|c| c.kind == "video") {
+                                        let t = if title.is_empty() { rep.title.clone() } else { title };
+                                        let best_url = best.url.clone();
+                                        // 解析出的作者/标签 + 用户填的标签合并成 hook 字符串，
+                                        // 落盘入库后 apply_pending_hooks 会一并挂上：原链接/作者/备注/标签
+                                        let mut all_tags: Vec<String> = rep.tags.clone();
+                                        for raw in tags.split(['，', ',', '、', ' ', ';', '；']) {
+                                            let name = raw.trim();
+                                            if !name.is_empty() && !all_tags.iter().any(|x| x == name) {
+                                                all_tags.push(name.to_string());
+                                            }
                                         }
+                                        let tags_joined = all_tags.join(",");
+                                        let author = rep.author.clone();
+                                        let site = rep.site.clone();
+                                        let note = rep.note.clone();
+                                        let hook_url = url.clone();
+                                        let hook_title = t.clone();
+                                        let queued = crate::with_library(&st, |lib| {
+                                            // 先登记元数据，再入队；同一 URL 覆盖更新（修正旧的错误 hook）
+                                            let _ = crate::db::submit_hook(
+                                                &lib.conn, &hook_url, &hook_title, &author, &site, &tags_joined, &note,
+                                            );
+                                            crate::db::create_download(&lib.conn, &best_url, &t, &site, "", &tags)
+                                        });
+                                        if queued.is_ok() {
+                                            if let (Some(app), Ok(root)) = (APP.get(), st.library_path()) {
+                                                crate::downloader::run_queue(app.clone(), root, 50);
+                                            }
+                                        }
+                                    } else {
+                                        // 解析成功但没有视频候选：把原因写进 bridge 回执，别静默吞掉
+                                        eprintln!("[bridge] 下载 {} 没有视频候选：{}", url, rep.note);
                                     }
                                 }
+                                Err(e) => eprintln!("[bridge] 解析 {} 失败：{e}", url),
                             }
                         });
                         (200, r#"{"ok":true,"queued":true,"note":"影匣正在后台解析并下载"}"#.into())

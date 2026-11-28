@@ -204,6 +204,8 @@ export interface ResolveReport {
   title: string;
   candidates: MediaCandidate[];
   note: string;
+  author?: string;
+  tags?: string[];
 }
 
 export interface EngineInfo {

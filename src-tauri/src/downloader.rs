@@ -147,6 +147,8 @@ pub fn resolve(url: &str) -> Result<ResolveReport, String> {
             title: name.clone(),
             candidates: vec![MediaCandidate { url: url.to_string(), name, kind: "video".into() }],
             note: "直链媒体，直接下载".into(),
+            author: String::new(),
+            tags: Vec::new(),
         });
     }
     if site_of(url).ends_with("hanime1.me") {
@@ -164,7 +166,7 @@ pub fn resolve(url: &str) -> Result<ResolveReport, String> {
     } else {
         format!("发现 {} 个媒体候选，勾选后开始下载", candidates.len())
     };
-    Ok(ResolveReport { site: site_of(url), title, candidates, note })
+    Ok(ResolveReport { site: site_of(url), title, candidates, note, author: String::new(), tags: Vec::new() })
 }
 
 /// 只抓页面元数据（标题/作者/标签），不下下载页——给浏览器脚本填表用。
@@ -207,6 +209,13 @@ fn hanime_meta(url: &str) -> Result<(String, String, Vec<String>), String> {
 ///   分类     <a href=".../search?genre=XXX">
 ///   视频标签 <a href=".../search?tags[]=XXX">（文本常带「 (1)」计数尾巴）
 ///   话题     query= 且文本 # 开头（# 原神 / # 胡桃）
+/// 解码常见 HTML 实体（页面里 `&nbsp;原神` 这类会混进标签/作者）。
+fn html_unescape(s: &str) -> String {
+    s.replace("&nbsp;", " ").replace("&#160;", " ")
+        .replace("&amp;", "&").replace("&quot;", "\"")
+        .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
+}
+
 fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
     let og = Regex::new(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#).ok();
     let title_tag = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok();
@@ -215,8 +224,7 @@ fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
         .map(|c| c[1].to_string())
         .or_else(|| title_tag.and_then(|r| r.captures(html)).map(|c| c[1].to_string()))
         .unwrap_or_default();
-    title = title
-        .replace("&amp;", "&")
+    title = html_unescape(&title)
         .trim()
         .trim_end_matches("- Hanime1.me")
         .trim()
@@ -224,31 +232,40 @@ fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
 
     let mut author = String::new();
     let mut tags: Vec<String> = Vec::new();
+    // 站点权威标签：meta keywords（原神, 胡桃, 4K…），干净且不含导航分类。
+    // 这份比 search? 链接可靠，优先用它。
+    if let Ok(re) = Regex::new(r#"(?is)<meta[^>]+name=["']keywords["'][^>]+content=["']([^"']*)["']"#) {
+        if let Some(c) = re.captures(html) {
+            for raw in c[1].split([',', '，', '、']) {
+                push_hanime_tag(&mut tags, &html_unescape(raw));
+            }
+        }
+    }
     // 抓所有 search? 链接（href + 链接文本），按参数分流
     if let Ok(re) = Regex::new(r#"(?is)<a[^>]+href="([^"]*search\?[^"]*)"[^>]*>(.*?)</a>"#) {
         let strip = Regex::new(r"<[^>]+>").ok();
         for c in re.captures_iter(html) {
-            let href = c[1].replace("&amp;", "&");
+            let href = html_unescape(&c[1]);
             let mut text = c[2].to_string();
             if let Some(r) = &strip {
                 text = r.replace_all(&text, "").to_string();
             }
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let text = html_unescape(&text).split_whitespace().collect::<Vec<_>>().join(" ");
             if text.is_empty() {
                 continue;
             }
-            if let Some(g) = href.split("genre=").nth(1) {
-                push_hanime_tag(&mut tags, &percent_decode_str(g.split('&').next().unwrap_or("")));
-            } else if href.contains("tags%5B%5D=") || href.contains("tags[]=") {
+            // genre= 是站点栏目（裏番/泡麵番/3DCG…），不是作品标签；meta keywords 已覆盖
+            // 真正的分类，这里不再抓，避免一堆导航噪音灌进标签。
+            if href.contains("tags%5B%5D=") || href.contains("tags[]=") {
                 let key = if href.contains("tags%5B%5D=") { "tags%5B%5D=" } else { "tags[]=" };
                 if let Some(t) = href.split(key).nth(1) {
-                    push_hanime_tag(&mut tags, &percent_decode_str(t.split('&').next().unwrap_or("")));
+                    push_hanime_tag(&mut tags, &html_unescape(&percent_decode_str(t.split('&').next().unwrap_or(""))));
                 }
             } else if let Some(q) = href.split("query=").nth(1) {
                 if text.starts_with('#') {
                     push_hanime_tag(&mut tags, &text);
-                } else if author.is_empty() && text.chars().count() < 40 {
-                    author = percent_decode_str(q.split('&').next().unwrap_or(""));
+                } else if author.is_empty() && text.chars().count() < 40 && !text.contains(' ') {
+                    author = html_unescape(&percent_decode_str(q.split('&').next().unwrap_or("")));
                 }
             }
         }
@@ -327,20 +344,27 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
         .map(|url| MediaCandidate { url, name: format!("{file_base}.mp4"), kind: "video".into() })
         .collect();
 
-    let mut note = if candidates.is_empty() {
-        format!(
-            "hanime1 · 作品 {id} · 服务器没抓到视频直链（多半被 hCaptcha 挡了）——请用浏览器油猴脚本的「下载视频」按钮，它能从已加载的页面里拿到直链"
-        )
+    let mut note = format!("hanime1 · 作品 {id}");
+    if candidates.is_empty() {
+        note.push_str(" · 服务器没抓到视频直链（多半被 hCaptcha 挡了）——请用浏览器油猴脚本的「下载视频」按钮，它能从已加载的页面里拿到直链");
     } else {
-        format!("hanime1 · 作品 {id} · 找到 {} 个画质", candidates.len())
-    };
+        note.push_str(&format!(" · 找到 {} 个画质", candidates.len()));
+    }
+    // 作者/标签走结构化字段传给下载链路写 web_hooks；note 也保留一份供面板直接查看
     if !author.is_empty() {
         note.push_str(&format!(" · 作者：{author}"));
     }
     if !tags.is_empty() {
         note.push_str(&format!(" · 标签：{}", tags.join("、")));
     }
-    Ok(ResolveReport { site: "hanime1.me".into(), title, candidates, note })
+    Ok(ResolveReport {
+        site: "hanime1.me".into(),
+        title,
+        candidates,
+        note,
+        author,
+        tags,
+    })
 }
 
 fn percent_decode_str(s: &str) -> String {
@@ -526,14 +550,29 @@ pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
             };
             match download_one(&app, task.id, &task.url, &target, referer) {
                 Ok((done, total)) => {
+                    // 后端闭环：下载落盘后立刻探测入库（前端下载面板监听是组件级的，
+                    // 从桥/油猴脚本触发时面板可能没开，不能靠它来 scan）。
+                    // ffprobe 在锁外跑，避免大文件探测时卡住界面。
+                    let rec = crate::media::record_for_file(&target);
                     let st = app.state::<crate::AppState>().clone();
-                let Ok(guard) = st.inner_lock() else { return; };
+                    let Ok(guard) = st.inner_lock() else { return; };
                     if let Ok(lib) = guard.library.as_ref().ok_or("库未打开") {
                         let _ = crate::db::update_download(&lib.conn, task.id, "done", 1.0, "", done, total, Some(&target.to_string_lossy()));
+                        let _ = crate::db::upsert_video(&lib.conn, &rec);
+                        // 把 web_hooks 里的原链接/作者/标签/备注挂到刚入库的条目
+                        let applied = crate::db::apply_pending_hooks(&lib.conn).unwrap_or(0);
+                        let _ = app.emit("download-progress", serde_json::json!({
+                            "id": task.id, "state": "done", "path": target.to_string_lossy(),
+                            "ingested": true, "hooksApplied": applied,
+                        }));
+                        if applied == 0 {
+                            eprintln!("[downloader] 任务 {} 入库后没有 hook 挂上（标题匹配失败或元数据未登记）", task.id);
+                        }
+                    } else {
+                        let _ = app.emit("download-progress", serde_json::json!({
+                            "id": task.id, "state": "done", "path": target.to_string_lossy(),
+                        }));
                     }
-                    let _ = app.emit("download-progress", serde_json::json!({
-                        "id": task.id, "state": "done", "path": target.to_string_lossy(),
-                    }));
                 }
                 Err(e) => {
                     let st = app.state::<crate::AppState>().clone();
@@ -589,12 +628,14 @@ mod tests {
         let html = r#"<!DOCTYPE html>
 <html><head>
 <title>[CBX-CJW] 胡桃-フータオ-HuTao【Genshin Impact】 - Hanime1.me</title>
+<meta name="keywords" content="原神, 胡桃, 4K, 內射, 無碼, 同人作品" />
 </head><body>
+<a href="https://hanime1.me/search?genre=裏番">裏番</a>
 <a href="https://hanime1.me/search?genre=MMD">MMD</a>
 <a href="https://hanime1.me/search?genre=3DCG">3DCG</a>
 <a href="https://hanime1.me/search?query=CBX-CJW">CBX-CJW</a>
-<a href="/search?query=%E5%8E%9F%E7%A5%9E"># 原神</a>
-<a href="/search?query=%E8%83%A1%E6%A1%83"># 胡桃</a>
+<a href="/search?query=%E5%8E%9F%E7%A5%9E">#&nbsp;原神</a>
+<a href="/search?query=%E8%83%A1%E6%A1%83">#&nbsp;胡桃</a>
 <a href="/search?tags%5B%5D=4K">4K (1)</a>
 <a href="/search?tags%5B%5D=%E7%84%A1%E7%A2%BC">无码 (1)</a>
 <script>var s = "https:\/\/vdownload.hembed.com\/409438-1080p.mp4?secure=bqvNSmaR9TO2k4y0Twptxg==,1795885260";</script>
@@ -602,9 +643,13 @@ mod tests {
         let (title, author, tags) = parse_hanime_watch(html);
         assert_eq!(title, "[CBX-CJW] 胡桃-フータオ-HuTao【Genshin Impact】");
         assert_eq!(author, "CBX-CJW");
-        for expect in ["MMD", "3DCG", "原神", "胡桃", "4K", "無碼"] {
+        for expect in ["原神", "胡桃", "4K", "內射", "無碼", "同人作品"] {
             assert!(tags.iter().any(|t| t == expect), "缺标签 {expect}，实际 {tags:?}");
         }
+        // 站点导航栏目不是作品标签，不能混进来
+        assert!(!tags.iter().any(|t| t == "裏番" || t == "泡麵番"), "导航栏目混进标签：{tags:?}");
+        // HTML 实体要解码
+        assert!(!tags.iter().any(|t| t.contains("nbsp")), "&nbsp; 未解码：{tags:?}");
         // 视频直链正则（含 JSON 转义 \/ 形式），解出来应是可下载的直链
         let re = Regex::new(r#"https?:\\?/\\?/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]*)?"#).unwrap();
         let urls: Vec<String> = re.find_iter(html).map(|m| m.as_str().replace("\\/", "/")).collect();

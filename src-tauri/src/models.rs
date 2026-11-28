@@ -204,6 +204,12 @@ pub struct ResolveReport {
     pub title: String,
     pub candidates: Vec<MediaCandidate>,
     pub note: String,
+    /// 原作者（站点解析出来时填；下载链路用它写 web_hooks）
+    #[serde(default)]
+    pub author: String,
+    /// 站点标签（同上）
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

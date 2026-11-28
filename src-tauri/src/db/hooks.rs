@@ -51,10 +51,43 @@ pub fn submit_hook(
         .optional()
         .map_err(|e| e.to_string())?;
 
+    // 同一 URL 重复提交（如重新下载/解析器升级后重挂）：先看看这条 hook 之前挂到了哪个视频。
+    // 有的话把该视频恢复成「未挂」状态（清出处 + 清旧 hook 标签 + note 里去掉旧 hook note），
+    // 再重置 applied_video_id，让 apply_pending_hooks 用新数据干净地重新挂一次。
+    let previously_applied: Option<i64> = conn
+        .query_row(
+            "SELECT applied_video_id FROM web_hooks WHERE url=?1 AND applied_video_id>0",
+            params![url],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(vid) = previously_applied {
+        let old_note: String = conn
+            .query_row("SELECT COALESCE(note,'') FROM web_hooks WHERE url=?1", params![url], |r| r.get(0))
+            .unwrap_or_default();
+        // note 是「原 note + char(10) + hook note」追加的，精确去掉这一段尾巴
+        conn.execute(
+            "UPDATE videos SET source_url='', source_author='', source_site='',
+                note = CASE WHEN note=?2 THEN '' WHEN note LIKE ?3 THEN SUBSTR(note, 1, LENGTH(note)-LENGTH(?2)-1) ELSE note END
+             WHERE id=?1",
+            params![vid, old_note, format!("%{}", old_note)],
+        )
+        .map_err(|e| e.to_string())?;
+        // 旧 hook 标签：只删 category='网页' 且确实由这条 hook 建的那批（按新 tags 差集精清）
+        // 简单稳妥：删掉该视频上 category='网页' 的关联，重新挂时会按新 tags 全量重建
+        conn.execute(
+            "DELETE FROM video_tags WHERE video_id=?1 AND tag_id IN (SELECT id FROM tags WHERE category='网页')",
+            params![vid],
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = refresh_tag_text(conn, vid);
+    }
+
     conn.execute(
         "INSERT INTO web_hooks (url, title, author, site, tags, note, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(url) DO UPDATE SET title=?2, author=?3, site=?4, tags=?5, note=?6",
+         ON CONFLICT(url) DO UPDATE SET title=?2, author=?3, site=?4, tags=?5, note=?6, applied_video_id=0",
         params![url, title, author, site, tags, note, now_secs()],
     )
     .map_err(|e| e.to_string())?;
