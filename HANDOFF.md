@@ -10,8 +10,11 @@
 
 ## 一、一句话现状
 
-影匣已装 **1.2.4**（FileVersion 1.2.4 / exe 9,690,112 B），
+影匣已装 **1.2.7**（FileVersion 1.2.7 / exe 9,710,080 B / exe 2026-11-28 13:40:18），
 看板登记一致（**源码 HEAD 以 `board.mjs check` 实读为准**，不要信本文里的哈希 —— 文档一提交就过期）。
+1.2.5～1.2.7 三批（2026-11-28）：`we-export` 导出后改 `sync-collections` 纯 SQL 增量同步、不再全库扫描；
+hanime 直链媒体识别 + 油猴脚本从 DOM 抓真实直链；**按管理员浏览器抓包实测重写 hanime 解析器**；
+新增 GitHub Actions 云端构建（打 `v*` tag 自动发 Release）。以上均未附带广播，17:08 由另一窗口统一收尾登记。
 **管理员 2026-11-27 03:03 实机验收通过**：重复清理面板、网格缩放与 Ctrl+滚轮、去重后交互全部确认可用。
 
 0.1.30/0.1.31 这批交付：**编号文件夹**（1、2、3…每夹 200，只往后追加，取消留空回填）、
@@ -152,7 +155,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 
 **A. 需要管理员配合的（我做不了）**
 
-1. **上传 GitHub**（管理员已定：后续云端备份走 GitHub）——仓库已就绪：91 个跟踪文件 / 1.7 MB，`.gitignore` 挡住 `target`/`node_modules`/`dist`/`*.db`/`*.db-shm`/`*.db-wal`/`tools/we-export/config.json`。建库后 `git remote add origin <url>` + `git push -u origin master`。**传成功之前，容灾只剩本地 `D:\VideoVault-backups` 一份（2.2 MB），别无副本。**
+1. ~~**上传 GitHub**~~ ✅ **已完成（2026-11-28 00:18，提 v1.2.0）**：公开仓库 `RobyKmiya/HX-video-vault`，master 已推、v1.2.0/v1.2.3/v1.2.4/v1.2.7 tag 已推；1.2.7 起云端构建走 `.github/workflows/build.yml`（打 `v*` tag 自动发 Release）。`.gitignore` 挡住 `target`/`node_modules`/`dist`/`*.db`/`*.db-shm`/`*.db-wal`/`tools/we-export/config.json`。源码容灾＝GitHub + `D:\VideoVault-backups` 双份。
 2. ~~**接触表补满**~~ ✅ **已完成（2026-11-27 10:35）**：`vaultctl sheets` 后台一轮跑完 1178 条、0 失败，全库 1884/1884 满覆盖（10:40 实测 SQLite 只读查询核对）。
 3. **历史 P0 实机验收**（第七节清单），全部只差人工点一遍。
 
@@ -219,7 +222,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 
 - 影匣下载器：贴 `https://hanime1.me/watch?v=ID` 进「下载」面板 → 走专用解析，拿 `/download?v=ID` 的画质列表（1080 优先），标题取 og:title，作者/标签从 `type=uploader|genre` 链接抓；下载带 `Referer: https://hanime1.me/`，落盘名 = 作品标题。
 - 油猴脚本：hanime 页面自动填作者与标签；「下载视频」不再直接抓播放器，而是 `POST /download` 交给影匣下最高画质（下载完成入库后，之前「记入影匣」的标签/备注/原链接会自动挂上）。
-- 注意：本机代理把该站 502 掉了，解析规则**未能在真实页面验证**，若解析失败会回退到播放页候选，并给出「下载页」按钮手动挑画质。
+- 注意：2026-11-28 管理员浏览器抓包实测后，**1.2.6/1.2.7 两轮重写解析器**（直链媒体识别 + DOM 抓真实直链 + 按真实页面结构重写），对应单测 `parse_hanime_watch_real_structure` 已绿、13:40 装机。本机代理仍把该站 502 掉，**真机下载链路仍需管理员点一遍**；若解析失败会回退到播放页候选，并给出「下载页」按钮手动挑画质。
 
 ## 七、待管理员实机验收（全部已装机，只差人工点）
 
@@ -253,6 +256,9 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 | 0.1.24 | 文件编辑/排序重构/16:9 网格（T-VV18） |
 | 0.1.25 | 最近入库视图 + 网格窗口化 + 进视口才抽帧 + v6 路径规范化去重；**库根收敛到 `F:\Hthings\Supervideo`** |
 | 0.1.26 | 画匣特性迁移：真无边框沉浸 / 播放器右键菜单 / 侧栏可拖宽 / 老板键 / 手势槽位 / Toast 分级；修 React #310 白屏 |
+| 1.2.7 | **hanime 解析器按真实页面重写**（管理员浏览器抓包实测）：`downloader.rs` 与油猴脚本同步改；13:40 装机。17:08 统一收尾：版本号提交 `af94cd0`、push master、打 v1.2.7 tag 走 GitHub Actions 云端 Release |
+| 1.2.6 | **WE 导出增量同步 + hanime 直链 + 云端构建**：`we-export` 导出后改 `sync-collections` 纯 SQL 增量同步（不再全库扫描）；hanime 直链媒体识别、油猴脚本从 DOM 抓真实直链；新增 `.github/workflows/build.yml`（打 `v*` tag 自动发 Release）；12:05 装机 |
+| 1.2.5 | 03:01 装机（本地包在 `src-tauri/target/release/bundle/nsis/`，无广播、未打 tag）；内容沿 1.2.4 主线，至 1.2.6 才补登记 |
 | 1.2.4 | **壁纸导出状态可视化**：助手加 `/status`（进度/成功失败/最近结果），copy 改异步+进度；面板加「导出状态」卡（进度条/阶段/当前文件 + 成功/失败/跳过徽标）与「最近导出」列表，原始日志折叠为排查用 |
 | 1.2.3 | **壁纸导出助手收进影匣托管 + 面板**：新增 `we_export.rs`（影匣拉起/守护 helper.mjs，15 秒探活自动重启）+「壁纸导出」面板（状态/启停/自检/配置/日志）；`install.mjs` 停用开机自启（改 removeAutostart），根治「端口 51789 反复失联」 |
 | 1.2.0 | **首个公开发行版（推 GitHub）**：版本号 0.1.38 → 1.2.0；仓库 `RobyKmiya/HX-video-vault`（公开）已建，master + v1.2.0 tag 已推，GitHub Release 附 `VideoVault_1.2.0_x64-setup.exe` |
