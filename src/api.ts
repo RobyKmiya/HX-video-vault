@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Collection,
+  DownloadRequest,
   DownloadTask,
+  EnqueueResult,
   DuplicateGroup,
   EditReport,
   EditSource,
@@ -99,6 +101,9 @@ export const api = {
   downloads: () => invoke<DownloadTask[]>("list_downloads"),
   addDownload: (url: string, title: string, site: string, targetPath: string, tags: string) =>
     invoke<number>("add_download", { url, title, site, targetPath, tags }),
+  /** 丢链接下载：作品页元数据入 hook，落盘后自动入库+打标+收进编号夹 */
+  enqueueDownload: (req: DownloadRequest) => invoke<EnqueueResult>("enqueue_download", { req }),
+  clearDoneDownloads: () => invoke<number>("clear_done_downloads"),
   removeDownload: (id: number, deleteFile: boolean) =>
     invoke<void>("remove_download", { id, deleteFile }),
   startDownloads: () => invoke<number>("start_downloads"),

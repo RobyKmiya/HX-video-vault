@@ -27,8 +27,20 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
     let cancelled = false;
     void import("@tauri-apps/api/event").then(({ listen }) => {
       return listen("download-progress", (e) => {
-        const p = e.payload as { id?: number; state?: string; event?: string };
-        if (p.state === "done") { notify("下载完成，正在扫描入库…"); void api.scan({ root: "", recursive: true }).then(onImported).catch(() => {}); }
+        const p = e.payload as {
+          id?: number; state?: string; event?: string;
+          ingested?: boolean; folderNo?: number; slotNo?: number; error?: string;
+        };
+        if (p.state === "done") {
+          if (p.ingested && p.folderNo) {
+            notify(`已入库：${p.folderNo} 号夹 第 ${p.slotNo} 条（标签 / 原链接 / 作者已挂上）`);
+            onImported();
+          } else if (p.ingested === false) {
+            // 后端入库失败才退回扫库兜底
+            notify(p.error ? `入库失败：${p.error}` : "下载完成，正在扫描入库…");
+            void api.scan({ root: "", recursive: true }).then(onImported).catch(() => {});
+          }
+        }
         void refresh();
       });
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn; }).catch(() => {});
@@ -50,7 +62,9 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
     try {
       const r = await api.resolveLink(url.trim());
       setReport(r);
-      setPicked(new Set(r.candidates.map((_, i) => i)));
+      // 默认只勾最高画质那一个：一页多画质是同一部片，全勾会重复下载
+      const best = r.candidates.findIndex((c) => c.kind === "video");
+      setPicked(new Set(best >= 0 ? [best] : []));
       if (!r.note.startsWith("发现")) notify(r.note);
     } catch (e) { notify(String(e)); }
     finally { setResolving(false); }
@@ -60,12 +74,26 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
     const chosen = candidates.filter((_, i) => picked.has(i));
     if (chosen.length === 0 && report) { notify("至少勾选一个媒体"); return; }
     const list = chosen.length ? chosen : [{ url: url.trim(), name: report?.title || "download", kind: "video" }];
+    // 解析出的作品标签 + 手填标签一起打包，去重保序
+    const extra = tagText.split(/[，,、;；\s]+/).map((s) => s.trim()).filter(Boolean);
+    const packed = [...(report?.tags ?? []), ...extra].filter((t, i, arr) => arr.indexOf(t) === i).join(",");
     try {
+      let queued = 0;
       for (const c of list) {
-        await api.addDownload(c.url, c.name, report?.site || "", "", tagText);
+        const r = await api.enqueueDownload({
+          url: c.url,
+          page_url: url.trim(),
+          title: report?.title || c.name,
+          site: report?.site || "",
+          author: report?.author || "",
+          tags: packed,
+          note: report?.note || "",
+        });
+        if (r.duplicate) { notify(r.message); continue; }
+        queued += 1;
       }
       await api.startDownloads();
-      notify(`已加入 ${list.length} 个下载任务`);
+      if (queued > 0) notify(`已加入 ${queued} 个下载任务，完成后自动入库打标`);
       setReport(null); setUrl(""); await refresh();
     } catch (e) { notify(String(e)); }
   };
@@ -77,7 +105,7 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
   return (
     <section className="stats-panel">
       <div className="panel-head">
-        <div><h1>下载器</h1><p>贴入网页链接 → 解析媒体 → 下载 → 自动入库打标；断网保留分片，联网后自动续跑</p></div>
+        <div><h1>下载器</h1><p>贴入网页链接 → 解析媒体 → 下载 → 自动入库打标并收进编号夹；断网保留分片，联网后自动续跑</p></div>
         <button className="icon-btn" onClick={onClose}><Icon name="x" size={18} /></button>
       </div>
 
@@ -94,7 +122,7 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
           </button>
         </div>
         <div className="field" style={{ marginTop: 12 }}>
-          <label>下载完成后自动打上的标签（逗号分隔）</label>
+          <label>自动打上的标签（逗号分隔；解析出的作品标签会一并打包）</label>
           <input value={tagText} onChange={(e) => setTagText(e.target.value)} placeholder="例如：B站, 直播录像" />
         </div>
         {tags.length > 0 && (
@@ -137,7 +165,12 @@ export function DownloadPanel({ tags, onClose, onImported, notify }: Props) {
 
       <div className="panel-card">
         <div className="resolve-head"><h2>下载队列</h2>
-          <button className="btn small" onClick={() => { void api.startDownloads().then(refresh); }}><Icon name="refresh" size={14} />续跑</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn small" onClick={async () => {
+              try { await api.clearDoneDownloads(); await refresh(); } catch (e) { notify(String(e)); }
+            }}>清空已完成</button>
+            <button className="btn small" onClick={() => { void api.startDownloads().then(refresh); }}><Icon name="refresh" size={14} />续跑</button>
+          </div>
         </div>
         {tasks.length === 0 ? <p className="muted">还没有下载任务</p> : (
           <div className="task-list">

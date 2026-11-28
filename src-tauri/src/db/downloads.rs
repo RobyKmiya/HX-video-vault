@@ -25,6 +25,33 @@ pub fn create_download(
     target_path: &str,
     tags: &str,
 ) -> Result<i64, String> {
+    // 同一 URL 只留一条任务：重复贴同一链接不该在队列里堆成一串。
+    // 已完成的任务再贴一次＝要求重下，把它重置回排队，而不是新建一行。
+    let existing: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, state FROM download_tasks WHERE url=?1 ORDER BY id DESC LIMIT 1",
+            params![url],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some((id, state)) = existing {
+        if state == "done" {
+            conn.execute(
+                "UPDATE download_tasks SET state='queued', progress=0, error='', bytes_done=0,
+                    title=?2, site=?3, tags=?4, updated_at=?5 WHERE id=?1",
+                params![id, title, site, tags, now_secs()],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE download_tasks SET title=?2, site=?3, tags=?4, updated_at=?5 WHERE id=?1",
+                params![id, title, site, tags, now_secs()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO download_tasks (url, title, site, state, target_path, tags, created_at, updated_at) VALUES (?1,?2,?3,'queued',?4,?5,?6,?6)",
         params![url, title, site, target_path, tags, now_secs()],
@@ -58,6 +85,25 @@ pub fn delete_download(conn: &Connection, id: i64) -> Result<(), String> {
 pub fn requeue_interrupted(conn: &Connection) -> Result<usize, String> {
     conn.execute(
         "UPDATE download_tasks SET state='queued', error='' WHERE state IN ('running','paused')",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 清掉历史遗留的重复任务行（去重上线前同一 URL 贴了多次）：每个 URL 只留最新一条。
+/// 只动队列记录，不碰磁盘文件，也不动库里的视频。
+pub fn prune_duplicate_downloads(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM download_tasks WHERE id NOT IN (SELECT MAX(id) FROM download_tasks GROUP BY url)",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 清空已完成/已取消的任务记录（队列只留进行中的，界面不再堆历史）。
+pub fn clear_done_downloads(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM download_tasks WHERE state IN ('done','canceled')",
         [],
     )
     .map_err(|e| e.to_string())

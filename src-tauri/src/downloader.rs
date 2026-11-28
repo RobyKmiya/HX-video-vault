@@ -62,6 +62,8 @@ fn fetch_html_with(url: &str, referer: Option<&str>) -> Result<String, String> {
     let curl = find_curl().ok_or("未找到 curl，无法访问链接")?;
     let mut cmd = crate::proc::quiet(curl);
     cmd.args(["-sSL", "--max-time", "25", "-A", UA]);
+    // 双击启动时进程环境里没有 http_proxy，必须显式带上系统代理，否则直连必超时
+    crate::netproxy::apply(&mut cmd);
     if let Some(r) = referer {
         cmd.args(["-e", r]);
     }
@@ -420,10 +422,12 @@ pub fn download_one(
     args.push("%{size_download} %{content_type}".into());
     args.push(url.into());
 
-    let mut child = crate::proc::quiet(curl)
-        .args(&args)
+    let mut cmd = crate::proc::quiet(curl);
+    cmd.args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::netproxy::apply(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 curl 失败: {e}"))?;
 
@@ -471,21 +475,101 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// 检查网络是否可达（给「联网后自动续跑」用）。
+/// 检查网络是否可达（给「联网后自动续跑」用）。直连和走代理各试一次：
+/// 直连能通就不依赖代理，代理能通也说明下载链路可用。
 pub fn network_ok() -> bool {
     let Some(curl) = find_curl() else { return false; };
-    crate::proc::quiet(curl)
-        .args(["-s", "--max-time", "6", "-o", "NUL", "https://www.baidu.com"])
-        .stdout(Stdio::null()).stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let probe = |cmd: &mut std::process::Command| {
+        cmd.args(["-s", "--max-time", "6", "-o", "NUL", "https://www.baidu.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if probe(&mut crate::proc::quiet(&curl)) {
+        return true;
+    }
+    let mut proxied = crate::proc::quiet(&curl);
+    crate::netproxy::apply(&mut proxied);
+    probe(&mut proxied)
+}
+
+/// 解析出的标签 + 用户填的标签合并成 hook 的 tags 字段（去重、保序）。
+pub fn merge_tag_text(parsed: &[String], extra: &str) -> String {
+    let mut all: Vec<String> = Vec::new();
+    for raw in parsed
+        .iter()
+        .map(|s| s.as_str())
+        .chain(extra.split(['，', ',', '、', ' ', ';', '；']))
+    {
+        let name = raw.trim();
+        if !name.is_empty() && !all.iter().any(|x| x == name) {
+            all.push(name.to_string());
+        }
+    }
+    all.join(",")
+}
+
+/// 下载完成后的入库结果（前端用来提示「进了第几号夹第几条」）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IngestOutcome {
+    pub video_id: i64,
+    pub file_name: String,
+    pub path: String,
+    pub folder_no: i64,
+    pub slot_no: i64,
+    pub hooks_applied: usize,
+}
+
+/// 把刚落盘的文件收进影匣：登记 → 挂网页元数据 → 按导入顺序装箱进编号夹。
+///
+/// 刻意复用扫描/启动整理同一套函数（upsert_video / organize_numbered），
+/// 不另造位置规则：`import_seq` 是导入身份证（MAX+1，只增不复用），
+/// `folder_no/slot_no` 由 organize_numbered 按 import_seq 顺序重算（每夹 200）。
+pub fn ingest_downloaded(
+    lib: &crate::db::LibraryContext,
+    rec: &crate::db::VideoRecord,
+) -> Result<IngestOutcome, String> {
+    crate::db::upsert_video(&lib.conn, rec)?;
+    let video_id: i64 = lib
+        .conn
+        .query_row(
+            "SELECT id FROM videos WHERE path=?1 AND entry_index=?2",
+            rusqlite::params![rec.path, rec.entry_index],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("入库后找不到条目：{e}"))?;
+    // 网页元数据（原链接/作者/备注/标签）跟着 hook 一起挂上；失败不影响入库
+    let hooks_applied = crate::db::apply_pending_hooks(&lib.conn).unwrap_or(0);
+    // downloads/ 里的散落文件按导入顺序收进 1..N 号夹，与「扫描/启动整理」同一规则
+    if crate::db::needs_organize(&lib.root) {
+        crate::db::organize_numbered(lib, crate::db::FOLDER_CAP)?;
+    }
+    let (path, folder_no, slot_no, file_name): (String, i64, i64, String) = lib
+        .conn
+        .query_row(
+            "SELECT path, folder_no, slot_no, file_name FROM videos WHERE id=?1",
+            rusqlite::params![video_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(IngestOutcome { video_id, file_name, path, folder_no, slot_no, hooks_applied })
 }
 
 /// 后台任务循环：启动时与网络恢复时调用，把 queued 任务逐个跑完。
 pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
     std::thread::spawn(move || {
         let _ = app.emit("download-progress", serde_json::json!({"event": "queue-start"}));
+        // 去重上线前可能堆了同一 URL 的多条任务行：只留最新一条
+        {
+            let st = app.state::<crate::AppState>().clone();
+            if let Ok(guard) = st.inner_lock() {
+                if let Ok(lib) = guard.library.as_ref().ok_or("库未打开") {
+                    let _ = crate::db::prune_duplicate_downloads(&lib.conn);
+                }
+            }
+        }
         let mut idle_rounds = 0;
         loop {
             let task: Option<DownloadTask> = {
@@ -550,23 +634,35 @@ pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
             };
             match download_one(&app, task.id, &task.url, &target, referer) {
                 Ok((done, total)) => {
-                    // 后端闭环：下载落盘后立刻探测入库（前端下载面板监听是组件级的，
-                    // 从桥/油猴脚本触发时面板可能没开，不能靠它来 scan）。
-                    // ffprobe 在锁外跑，避免大文件探测时卡住界面。
+                    // 后端闭环：下载落盘后立刻入库并按库的导入规则归档。
+                    // 前端下载面板的监听是组件级的，从桥/油猴脚本触发时面板可能没开，
+                    // 不能指望它来 scan。ffprobe 在锁外跑，避免大文件探测时卡住界面。
                     let rec = crate::media::record_for_file(&target);
                     let st = app.state::<crate::AppState>().clone();
                     let Ok(guard) = st.inner_lock() else { return; };
                     if let Ok(lib) = guard.library.as_ref().ok_or("库未打开") {
                         let _ = crate::db::update_download(&lib.conn, task.id, "done", 1.0, "", done, total, Some(&target.to_string_lossy()));
-                        let _ = crate::db::upsert_video(&lib.conn, &rec);
-                        // 把 web_hooks 里的原链接/作者/标签/备注挂到刚入库的条目
-                        let applied = crate::db::apply_pending_hooks(&lib.conn).unwrap_or(0);
-                        let _ = app.emit("download-progress", serde_json::json!({
-                            "id": task.id, "state": "done", "path": target.to_string_lossy(),
-                            "ingested": true, "hooksApplied": applied,
-                        }));
-                        if applied == 0 {
-                            eprintln!("[downloader] 任务 {} 入库后没有 hook 挂上（标题匹配失败或元数据未登记）", task.id);
+                        match ingest_downloaded(lib, &rec) {
+                            Ok(out) => {
+                                // 文件已被整理进编号夹，任务里的落点跟着更新
+                                let _ = crate::db::update_download(&lib.conn, task.id, "done", 1.0, "", done, total, Some(&out.path));
+                                let _ = app.emit("download-progress", serde_json::json!({
+                                    "id": task.id, "state": "done", "ingested": true,
+                                    "videoId": out.video_id, "folderNo": out.folder_no,
+                                    "slotNo": out.slot_no, "hooksApplied": out.hooks_applied,
+                                    "file": out.file_name, "path": out.path,
+                                }));
+                                if out.hooks_applied == 0 {
+                                    eprintln!("[downloader] 任务 {} 入库后没有 hook 挂上（标题匹配失败或元数据未登记）", task.id);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[downloader] 任务 {} 入库失败：{e}", task.id);
+                                let _ = app.emit("download-progress", serde_json::json!({
+                                    "id": task.id, "state": "done", "ingested": false, "error": e,
+                                    "path": target.to_string_lossy(),
+                                }));
+                            }
                         }
                     } else {
                         let _ = app.emit("download-progress", serde_json::json!({

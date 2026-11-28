@@ -6,6 +6,7 @@ pub mod importer;
 pub mod media;
 pub mod models;
 mod mpv;
+pub mod netproxy;
 pub mod player;
 mod proc;
 pub(crate) mod bridge;
@@ -370,6 +371,8 @@ pub fn run() {
             commands::downloads::resolve_link,
             commands::downloads::list_downloads,
             commands::downloads::add_download,
+            commands::downloads::enqueue_download,
+            commands::downloads::clear_done_downloads,
             commands::downloads::remove_download,
             commands::downloads::start_downloads,
             commands::editing::trim_video,

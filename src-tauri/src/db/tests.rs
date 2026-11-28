@@ -1027,6 +1027,26 @@ fn web_hook_attaches_source_and_tags_on_title_match() {
     .unwrap();
     assert_eq!(dup2, Some(v.id), "同一出处应能查出已入库的视频");
 
+    // 再贴一次同一链接（解析器升级 / 用户重复丢链接）：就地刷新，不能把元数据清空或叠加
+    for _ in 0..2 {
+        let (_, dup3) = submit_hook(
+            &ctx.conn,
+            "https://example.com/watch/1",
+            "My Awesome Clip",
+            "新作者",
+            "example.com",
+            "MMD, 4K",
+            "来自网页",
+        )
+        .unwrap();
+        assert_eq!(dup3, Some(v.id));
+    }
+    let v3 = query_videos(&ctx.conn, &VideoQuery::default()).unwrap().items.remove(0);
+    assert_eq!(v3.source_author, "新作者", "重复提交要就地刷新作者");
+    assert_eq!(v3.note, "来自网页", "备注只能留一份，不能重复追加");
+    assert!(v3.tags.contains(&"4K".to_string()), "新标签要挂上：{:?}", v3.tags);
+    assert!(!v3.tags.contains(&"原神".to_string()), "旧标签要被替换：{:?}", v3.tags);
+
     drop(ctx);
     let _ = fs::remove_dir_all(root);
 }

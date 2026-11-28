@@ -199,6 +199,22 @@ export interface MediaCandidate {
   kind: string;
 }
 
+export interface EnqueueResult {
+  id: number;
+  duplicate: boolean;
+  message: string;
+}
+
+export interface DownloadRequest {
+  url: string;
+  page_url: string;
+  title: string;
+  site: string;
+  author: string;
+  tags: string;
+  note: string;
+}
+
 export interface ResolveReport {
   site: string;
   title: string;

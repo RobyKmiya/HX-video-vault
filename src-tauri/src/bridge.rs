@@ -124,14 +124,7 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
                                         let best_url = best.url.clone();
                                         // 解析出的作者/标签 + 用户填的标签合并成 hook 字符串，
                                         // 落盘入库后 apply_pending_hooks 会一并挂上：原链接/作者/备注/标签
-                                        let mut all_tags: Vec<String> = rep.tags.clone();
-                                        for raw in tags.split(['，', ',', '、', ' ', ';', '；']) {
-                                            let name = raw.trim();
-                                            if !name.is_empty() && !all_tags.iter().any(|x| x == name) {
-                                                all_tags.push(name.to_string());
-                                            }
-                                        }
-                                        let tags_joined = all_tags.join(",");
+                                        let tags_joined = crate::downloader::merge_tag_text(&rep.tags, &tags);
                                         let author = rep.author.clone();
                                         let site = rep.site.clone();
                                         let note = rep.note.clone();
@@ -139,14 +132,21 @@ fn handle(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
                                         let hook_title = t.clone();
                                         let queued = crate::with_library(&st, |lib| {
                                             // 先登记元数据，再入队；同一 URL 覆盖更新（修正旧的错误 hook）
-                                            let _ = crate::db::submit_hook(
+                                            let (_, existing) = crate::db::submit_hook(
                                                 &lib.conn, &hook_url, &hook_title, &author, &site, &tags_joined, &note,
-                                            );
-                                            crate::db::create_download(&lib.conn, &best_url, &t, &site, "", &tags)
+                                            )?;
+                                            // 同一个作品页已经在库里：不重复下载，只刷新元数据
+                                            if let Some(vid) = existing {
+                                                return Ok((vid, false));
+                                            }
+                                            let id = crate::db::create_download(&lib.conn, &best_url, &t, &site, "", &tags)?;
+                                            Ok((id, true))
                                         });
-                                        if queued.is_ok() {
-                                            if let (Some(app), Ok(root)) = (APP.get(), st.library_path()) {
-                                                crate::downloader::run_queue(app.clone(), root, 50);
+                                        if let Ok((_, should_run)) = queued {
+                                            if should_run {
+                                                if let (Some(app), Ok(root)) = (APP.get(), st.library_path()) {
+                                                    crate::downloader::run_queue(app.clone(), root, 50);
+                                                }
                                             }
                                         }
                                     } else {

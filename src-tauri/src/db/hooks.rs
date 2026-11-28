@@ -28,7 +28,11 @@ fn norm(s: &str) -> String {
 }
 
 /// 提交一条网页元数据；同一 URL 覆盖更新。
-/// 返回 `(hook_id, 是否已有相同出处的视频)`——后者就是“防重复”的依据。
+///
+/// **幂等**：如果这条 hook 之前已经挂到某条视频上（比如解析器升级后重新提交、
+/// 或者用户又贴了一次同一链接），就地把那条视频的出处/备注/标签刷新成最新，
+/// 而不是先清空再等下一次扫描——否则「已入库」的条目会出现元数据空窗。
+/// 返回 `(hook_id, 已对上的视频 id)`，后者为 `Some` 就是“库里已有这个出处”。
 pub fn submit_hook(
     conn: &Connection,
     url: &str,
@@ -42,7 +46,29 @@ pub fn submit_hook(
     if url.is_empty() {
         return Err("url 不能为空".into());
     }
-    let existing: Option<i64> = conn
+    // 提交前的状态：这条 hook 原来挂在哪、旧 note 是什么（用于精准替换）
+    let prev: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT applied_video_id, COALESCE(note,'') FROM web_hooks WHERE url=?1",
+            params![url],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (prev_applied, old_note) = prev.unwrap_or((0, String::new()));
+    let prev_alive: Option<i64> = if prev_applied > 0 {
+        conn.query_row(
+            "SELECT id FROM videos WHERE id=?1 AND trashed=0",
+            params![prev_applied],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    // 同出处已经在库里的视频（hook 没挂上但 source_url 已写过的历史数据）
+    let by_url: Option<i64> = conn
         .query_row(
             "SELECT id FROM videos WHERE source_url=?1 AND trashed=0 LIMIT 1",
             params![url],
@@ -51,50 +77,63 @@ pub fn submit_hook(
         .optional()
         .map_err(|e| e.to_string())?;
 
-    // 同一 URL 重复提交（如重新下载/解析器升级后重挂）：先看看这条 hook 之前挂到了哪个视频。
-    // 有的话把该视频恢复成「未挂」状态（清出处 + 清旧 hook 标签 + note 里去掉旧 hook note），
-    // 再重置 applied_video_id，让 apply_pending_hooks 用新数据干净地重新挂一次。
-    let previously_applied: Option<i64> = conn
-        .query_row(
-            "SELECT applied_video_id FROM web_hooks WHERE url=?1 AND applied_video_id>0",
-            params![url],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some(vid) = previously_applied {
-        let old_note: String = conn
-            .query_row("SELECT COALESCE(note,'') FROM web_hooks WHERE url=?1", params![url], |r| r.get(0))
-            .unwrap_or_default();
-        // note 是「原 note + char(10) + hook note」追加的，精确去掉这一段尾巴
-        conn.execute(
-            "UPDATE videos SET source_url='', source_author='', source_site='',
-                note = CASE WHEN note=?2 THEN '' WHEN note LIKE ?3 THEN SUBSTR(note, 1, LENGTH(note)-LENGTH(?2)-1) ELSE note END
-             WHERE id=?1",
-            params![vid, old_note, format!("%{}", old_note)],
-        )
-        .map_err(|e| e.to_string())?;
-        // 旧 hook 标签：只删 category='网页' 且确实由这条 hook 建的那批（按新 tags 差集精清）
-        // 简单稳妥：删掉该视频上 category='网页' 的关联，重新挂时会按新 tags 全量重建
-        conn.execute(
-            "DELETE FROM video_tags WHERE video_id=?1 AND tag_id IN (SELECT id FROM tags WHERE category='网页')",
-            params![vid],
-        )
-        .map_err(|e| e.to_string())?;
-        let _ = refresh_tag_text(conn, vid);
-    }
-
+    // 先更新 hook 行（保留 applied_video_id，避免出现「已清空但没重挂」的中间态）
     conn.execute(
         "INSERT INTO web_hooks (url, title, author, site, tags, note, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(url) DO UPDATE SET title=?2, author=?3, site=?4, tags=?5, note=?6, applied_video_id=0",
+         ON CONFLICT(url) DO UPDATE SET title=?2, author=?3, site=?4, tags=?5, note=?6",
         params![url, title, author, site, tags, note, now_secs()],
     )
     .map_err(|e| e.to_string())?;
     let id: i64 = conn
         .query_row("SELECT id FROM web_hooks WHERE url=?1", params![url], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    Ok((id, existing))
+
+    let target = prev_alive.or(by_url);
+    match target {
+        Some(video_id) => {
+            // 撤掉上一版 hook 留下的痕迹（note 尾巴 + category='网页' 的标签），
+            // 再用最新数据挂一遍——重复提交多少次结果都一样。
+            if !old_note.is_empty() {
+                conn.execute(
+                    "UPDATE videos SET note = CASE WHEN note=?2 THEN '' WHEN note LIKE ?3 THEN SUBSTR(note, 1, LENGTH(note)-LENGTH(?2)-1) ELSE note END
+                     WHERE id=?1",
+                    params![video_id, old_note, format!("%{}", old_note)],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            conn.execute(
+                "DELETE FROM video_tags WHERE video_id=?1 AND tag_id IN (SELECT id FROM tags WHERE category='网页')",
+                params![video_id],
+            )
+            .map_err(|e| e.to_string())?;
+            let _ = refresh_tag_text(conn, video_id);
+            let hook = HookRecord {
+                id,
+                url: url.to_string(),
+                title: title.to_string(),
+                author: author.to_string(),
+                site: site.to_string(),
+                tags: tags.to_string(),
+                note: note.to_string(),
+            };
+            attach(conn, &hook, video_id)?;
+            conn.execute(
+                "UPDATE web_hooks SET applied_video_id=?2 WHERE id=?1",
+                params![id, video_id],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((id, Some(video_id)))
+        }
+        None => {
+            // 之前挂过的视频被删了：复位，等新文件入库后由 apply_pending_hooks 再挂
+            if prev_applied > 0 {
+                conn.execute("UPDATE web_hooks SET applied_video_id=0 WHERE id=?1", params![id])
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok((id, None))
+        }
+    }
 }
 
 /// 把一个 hook 挂到视频上：填出处、追加标签、合并备注。
