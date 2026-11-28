@@ -37,46 +37,51 @@
     const m = location.search.match(/[?&]v=(\d+)/);
     return m ? m[1] : "";
   }
-  /** hanime1 的作者与标签都挂在 /search?query=...&type=uploader|genre 链接上 */
+  /** hanime1 的作者与标签（2026-11-28 按真实 DOM 重写）：
+   *  作者   a[href*="search?query=XXX"] 且文本不带 #
+   *  分类   a[href*="search?genre=XXX"]
+   *  标签   a[href*="search?tags[]=XXX"]（文本带「 (1)」计数）
+   *  话题   query= 且文本 # 开头（# 原神） */
   function hanimeAuthor() {
-    const a =
-      document.querySelector('a[href*="type=uploader"]') ||
-      document.querySelector('a[href*="type=artist"]') ||
-      document.querySelector('a[href*="/artist/"]') ||
-      document.querySelector('a[href*="/uploader/"]');
-    return txt(a?.textContent);
+    let out = "";
+    document.querySelectorAll('a[href*="search?query="]').forEach((a) => {
+      const t = txt(a.textContent);
+      if (!out && t && !t.startsWith("#") && t.length < 40) out = t;
+    });
+    if (!out) out = txt(document.querySelector('a[href*="/uploader/"]') || document.querySelector('a[href*="/artist/"]')?.textContent);
+    return out;
   }
   function hanimeTags() {
     const out = new Set();
-    const push = (el) => {
-      const t = txt(el?.textContent);
-      if (t && t.length <= 24 && !/^\d+$/.test(t)) out.add(t);
+    const push = (t) => {
+      let s = txt(t).replace(/\s*\(\d+\)\s*$/, "").replace(/^#\s*/, "").trim();
+      if (s && s.length <= 30) out.add(s);
     };
-    document.querySelectorAll('a[href*="type=genre"], a[href*="/tags/"], a[href*="type=tag"]').forEach(push);
-    // 兜底：页面上带标签样式的链接（hanime 改版后 class 常带 tag）
-    if (out.size === 0) {
-      document.querySelectorAll('a.tag, a[class*="tag"], span[class*="tag"]').forEach(push);
-    }
+    document.querySelectorAll('a[href*="search?genre="]').forEach((a) => push(a.textContent));
+    document.querySelectorAll('a[href*="search?tags"]').forEach((a) => push(a.textContent));
+    document.querySelectorAll('a[href*="search?query="]').forEach((a) => {
+      const t = txt(a.textContent);
+      if (t.startsWith("#")) push(t);
+    });
     return [...out];
   }
 
-  /** hanime1 的视频直链：从 DOM 里抓（mp4 是 JS 加载的，服务器 curl 抓不到） */
+  /** hanime1 的视频直链（2026-11-28 实测）：挂在 JW Player 配置里，
+   *  域名 vdownload.hembed.com，形如 /{id}-{画质}p.mp4?secure=令牌,过期戳。
+   *  在整页 HTML（含 script）里搜 .mp4，兼容 JSON 转义（\/）。 */
   function hanimeVideoUrl() {
-    // 1) 标准 <video> 元素（含 source 子元素）
     const v = $("video");
     if (v) {
       const src = v.currentSrc || v.src || ($("source", v) && $("source", v).src);
       if (src && !src.startsWith("blob:")) return src;
     }
-    // 2) og:video 系列 meta
-    const ogv = meta("og:video") || meta("og:video:url") || meta("og:video:secure_url");
-    if (ogv) return ogv;
-    // 3) 页面任意 <script>/JSON 里的 .mp4 直链（hanime 常把视频配置塞进 script 变量）
-    for (const s of document.querySelectorAll("script")) {
-      const m = (s.textContent || "").match(/https?:\\\/\\\/[^"'\\s]+?\.mp4(?:\\?[^"'\\s]*)?/i);
-      if (m) return m[0].replace(/\\\//g, "/");
-    }
-    return "";
+    const html = document.documentElement.outerHTML;
+    const re = /https?:\\?\/\\?\/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]*)?/gi;
+    const urls = (html.match(re) || []).map((u) => u.replace(/\\\//g, "/"));
+    // 画质优先：2160 > 1080 > 720 > 480
+    const rank = (u) => (/2160|4k/i.test(u) ? 0 : /1080/.test(u) ? 1 : /720/.test(u) ? 2 : /480/.test(u) ? 3 : 4);
+    urls.sort((a, b) => rank(a) - rank(b));
+    return urls[0] || meta("og:video") || "";
   }
 
   /** 作者/上传者：优先站点特征，其次 meta，最后页面标题里的「- xxx」尾巴 */

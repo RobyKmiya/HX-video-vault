@@ -200,6 +200,13 @@ fn hanime_meta(url: &str) -> Result<(String, String, Vec<String>), String> {
     Ok(parse_hanime_watch(&html))
 }
 
+/// 作品页 → (标题, 作者, 标签)。
+/// 2026-11-28 按管理员从浏览器抓的真实 DOM 重写：
+///   标题     og:title，尾巴「 - Hanime1.me」
+///   作者     <a href=".../search?query=XXX">，链接文本不带 #（带 # 的是话题标签）
+///   分类     <a href=".../search?genre=XXX">
+///   视频标签 <a href=".../search?tags[]=XXX">（文本常带「 (1)」计数尾巴）
+///   话题     query= 且文本 # 开头（# 原神 / # 胡桃）
 fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
     let og = Regex::new(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#).ok();
     let title_tag = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok();
@@ -210,30 +217,57 @@ fn parse_hanime_watch(html: &str) -> (String, String, Vec<String>) {
         .unwrap_or_default();
     title = title
         .replace("&amp;", "&")
-        .split(['|', '–'])
-        .next()
-        .unwrap_or(&title)
         .trim()
         .trim_end_matches("- Hanime1.me")
         .trim()
         .to_string();
 
     let mut author = String::new();
-    if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=uploader"#) {
-        if let Some(c) = re.captures(html) {
-            author = percent_decode_str(&c[1]);
-        }
-    }
     let mut tags: Vec<String> = Vec::new();
-    if let Ok(re) = Regex::new(r#"(?i)href=["']/search\?query=([^"'&]+)[^"']*type=genre"#) {
+    // 抓所有 search? 链接（href + 链接文本），按参数分流
+    if let Ok(re) = Regex::new(r#"(?is)<a[^>]+href="([^"]*search\?[^"]*)"[^>]*>(.*?)</a>"#) {
+        let strip = Regex::new(r"<[^>]+>").ok();
         for c in re.captures_iter(html) {
-            let t = percent_decode_str(&c[1]);
-            if !t.is_empty() && !tags.contains(&t) {
-                tags.push(t);
+            let href = c[1].replace("&amp;", "&");
+            let mut text = c[2].to_string();
+            if let Some(r) = &strip {
+                text = r.replace_all(&text, "").to_string();
+            }
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(g) = href.split("genre=").nth(1) {
+                push_hanime_tag(&mut tags, &percent_decode_str(g.split('&').next().unwrap_or("")));
+            } else if href.contains("tags%5B%5D=") || href.contains("tags[]=") {
+                let key = if href.contains("tags%5B%5D=") { "tags%5B%5D=" } else { "tags[]=" };
+                if let Some(t) = href.split(key).nth(1) {
+                    push_hanime_tag(&mut tags, &percent_decode_str(t.split('&').next().unwrap_or("")));
+                }
+            } else if let Some(q) = href.split("query=").nth(1) {
+                if text.starts_with('#') {
+                    push_hanime_tag(&mut tags, &text);
+                } else if author.is_empty() && text.chars().count() < 40 {
+                    author = percent_decode_str(q.split('&').next().unwrap_or(""));
+                }
             }
         }
     }
     (title, author, tags)
+}
+
+/// 标签清洗：去 # 前缀、去「 (1)」计数尾巴、去重
+fn push_hanime_tag(tags: &mut Vec<String>, raw: &str) {
+    let mut t = raw.trim().to_string();
+    if let Some(s) = t.strip_prefix('#') {
+        t = s.trim().to_string();
+    }
+    if let Ok(r) = Regex::new(r"\s*\(\d+\)\s*$") {
+        t = r.replace_all(&t, "").to_string();
+    }
+    if !t.is_empty() && t.chars().count() <= 30 && !tags.contains(&t) {
+        tags.push(t);
+    }
 }
 
 fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
@@ -241,31 +275,43 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
     let watch_url = format!("https://hanime1.me/watch?v={id}");
     let dl_url = format!("https://hanime1.me/download?v={id}");
     let (title, author, tags) = hanime_meta(url).unwrap_or_else(|_| (String::new(), String::new(), Vec::new()));
-    let dl_html = fetch_html_with(&dl_url, Some(&watch_url))?;
 
-    // 画质候选：下载页里的 mp4 直链，1080 排前
-    let link_re = Regex::new(
-        r#"(?i)(?:href|src|data-url|data-src)\s*=\s*["'](https?://[^"']+?\.mp4(?:\?[^"']*)?)["']"#,
-    )
-    .map_err(|e| e.to_string())?;
+    // 视频直链（2026-11-28 按真实页面重写）：挂在 JW Player 配置里，
+    // 域名 vdownload.hembed.com，形如 /{id}-{画质}p.mp4?secure=令牌,过期戳。
+    // 兼容 JSON 转义（\/）与普通写法；优先作品页，下载页兜底。
+    let link_re = Regex::new(r#"https?:\\?/\\?/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]*)?"#).map_err(|e| e.to_string())?;
     let mut urls: Vec<String> = Vec::new();
-    for c in link_re.captures_iter(&dl_html) {
-        let u = c[1].replace("&amp;", "&");
+    let watch_html = fetch_html_with(&watch_url, Some("https://hanime1.me/")).unwrap_or_default();
+    for c in link_re.captures_iter(&watch_html) {
+        let u = c[0].replace("\\/", "/").replace("&amp;", "&");
         if !urls.contains(&u) {
             urls.push(u);
         }
     }
     if urls.is_empty() {
-        let watch_html = fetch_html_with(&watch_url, Some("https://hanime1.me/")).unwrap_or_default();
-        for c in extract_candidates(&watch_html, &watch_url) {
-            if c.kind == "video" && !urls.contains(&c.url) {
-                urls.push(c.url);
+        if let Ok(dl_html) = fetch_html_with(&dl_url, Some(&watch_url)) {
+            for c in link_re.captures_iter(&dl_html) {
+                let u = c[0].replace("\\/", "/").replace("&amp;", "&");
+                if !urls.contains(&u) {
+                    urls.push(u);
+                }
             }
         }
     }
+    // 画质排序：2160/4K > 1080 > 720 > 480
     let rank = |u: &String| -> u8 {
         let l = u.to_ascii_lowercase();
-        if l.contains("1080") { 0 } else if l.contains("720") { 1 } else if l.contains("480") { 2 } else { 3 }
+        if l.contains("2160") || l.contains("4k") {
+            0
+        } else if l.contains("1080") {
+            1
+        } else if l.contains("720") {
+            2
+        } else if l.contains("480") {
+            3
+        } else {
+            4
+        }
     };
     urls.sort_by_key(rank);
 
@@ -281,7 +327,13 @@ fn resolve_hanime(url: &str) -> Result<ResolveReport, String> {
         .map(|url| MediaCandidate { url, name: format!("{file_base}.mp4"), kind: "video".into() })
         .collect();
 
-    let mut note = format!("hanime1 · 作品 {id} · 找到 {} 个画质", candidates.len());
+    let mut note = if candidates.is_empty() {
+        format!(
+            "hanime1 · 作品 {id} · 服务器没抓到视频直链（多半被 hCaptcha 挡了）——请用浏览器油猴脚本的「下载视频」按钮，它能从已加载的页面里拿到直链"
+        )
+    } else {
+        format!("hanime1 · 作品 {id} · 找到 {} 个画质", candidates.len())
+    };
     if !author.is_empty() {
         note.push_str(&format!(" · 作者：{author}"));
     }
@@ -451,7 +503,10 @@ pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
             let _ = app.emit("download-progress", serde_json::json!({"id": task.id, "state": "running"}));
             let out_dir = root.join("downloads");
             let target = if task.target_path.is_empty() {
-                if task.site.contains("hanime1") && !task.title.trim().is_empty() {
+                // hanime 直链挂在 vdownload.hembed.com，文件名用作品标题
+                let is_hanime_media =
+                    task.site.contains("hanime1") || task.site.contains("hembed");
+                if is_hanime_media && !task.title.trim().is_empty() {
                     let mut n = safe_name(&task.title);
                     if !n.to_ascii_lowercase().ends_with(".mp4") {
                         n.push_str(".mp4");
@@ -463,7 +518,12 @@ pub fn run_queue(app: AppHandle, root: PathBuf, max_items: usize) {
             } else {
                 PathBuf::from(&task.target_path)
             };
-            let referer = if task.site.contains("hanime1") { Some("https://hanime1.me/") } else { None };
+            // hembed 是 hanime 的视频 CDN，同样要带站点 Referer
+            let referer = if task.site.contains("hanime1") || task.site.contains("hembed") {
+                Some("https://hanime1.me/")
+            } else {
+                None
+            };
             match download_one(&app, task.id, &task.url, &target, referer) {
                 Ok((done, total)) => {
                     let st = app.state::<crate::AppState>().clone();
@@ -520,5 +580,37 @@ mod tests {
     #[test]
     fn site_extraction() {
         assert_eq!(site_of("https://www.bilibili.com/video/av1"), "bilibili.com");
+    }
+
+    // 2026-11-28 按管理员从浏览器抓的真实 hanime 结构验证
+    // （vdownload.hembed.com 直链 + search?genre/tags/query 三类链接）
+    #[test]
+    fn parse_hanime_watch_real_structure() {
+        let html = r#"<!DOCTYPE html>
+<html><head>
+<title>[CBX-CJW] 胡桃-フータオ-HuTao【Genshin Impact】 - Hanime1.me</title>
+</head><body>
+<a href="https://hanime1.me/search?genre=MMD">MMD</a>
+<a href="https://hanime1.me/search?genre=3DCG">3DCG</a>
+<a href="https://hanime1.me/search?query=CBX-CJW">CBX-CJW</a>
+<a href="/search?query=%E5%8E%9F%E7%A5%9E"># 原神</a>
+<a href="/search?query=%E8%83%A1%E6%A1%83"># 胡桃</a>
+<a href="/search?tags%5B%5D=4K">4K (1)</a>
+<a href="/search?tags%5B%5D=%E7%84%A1%E7%A2%BC">无码 (1)</a>
+<script>var s = "https:\/\/vdownload.hembed.com\/409438-1080p.mp4?secure=bqvNSmaR9TO2k4y0Twptxg==,1795885260";</script>
+</body></html>"#;
+        let (title, author, tags) = parse_hanime_watch(html);
+        assert_eq!(title, "[CBX-CJW] 胡桃-フータオ-HuTao【Genshin Impact】");
+        assert_eq!(author, "CBX-CJW");
+        for expect in ["MMD", "3DCG", "原神", "胡桃", "4K", "無碼"] {
+            assert!(tags.iter().any(|t| t == expect), "缺标签 {expect}，实际 {tags:?}");
+        }
+        // 视频直链正则（含 JSON 转义 \/ 形式），解出来应是可下载的直链
+        let re = Regex::new(r#"https?:\\?/\\?/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]*)?"#).unwrap();
+        let urls: Vec<String> = re.find_iter(html).map(|m| m.as_str().replace("\\/", "/")).collect();
+        assert!(
+            urls.iter().any(|u| u.contains("vdownload.hembed.com/409438-1080p.mp4?secure=")),
+            "实际 {urls:?}"
+        );
     }
 }
