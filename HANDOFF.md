@@ -204,6 +204,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 20. **全库扫描会把回收站全部复活**（11-27 发现，`9b5d6b3` 修复、**已随 0.1.28 发出**）：`upsert_video` 原来每次扫到同一路径都无条件 `trashed=0`，跑一次「扫描库」就把回收站清空——包括内容去重标记的 59 个副本，去重成果被无声撤销。11-27 上午补接触表时我也踩了一次（活跃 1884→1954）。已改为**只在文件大小/mtime 变化时才清回收站**，未变化的文件尊重用户决定。0.1.28 起可以正常「扫描库」了；0.1.27 及更早版本仍有此问题。
 22. **换了图标桌面还是旧的 = Windows 图标缓存**（11-27）：exe 里图标已换（可用 shell32.ExtractIconExW + DrawIconEx 采样像素验证：四角深色 (28,24,21)、中心橙 (243,113,22)），但桌面仍显示旧图。处理：`ie4uinit.exe -ClearIconCache` + 删 `%LOCALAPPDATA%\IconCache.db` 与 `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db`，再重启 explorer.exe。注意本环境 `Add-Type` 与 `-ComObject` 都被安全策略拦，重写 .lnk 只能靠 explorer 重建缓存。
 21. **库内路径分隔符混写会让扫描把老记录判成丢失**（11-27 踩过，`0.1.31` 已修）：CLI 传 `--library F:/Hthings/Supervideo`（正斜杠）时，整理后写进库的是 `F:/Hthings/Supervideo\1\x.mp4`，而扫描 walk 出来是 `F:\Hthings\Supervideo\1\x.mp4`；`upsert_video` 按原始 `path` 匹配，于是**每条都当新文件再插一遍**，旧行被 `mark_missing` 打进回收站（实测多出 1883 条重复）。修法：整理前把库内 `path` 的 `/` 统一成 `\`，目标路径也按同规则生成。**教训：任何写 `path` 的地方都要与扫描 walk 的写法（反斜杠）保持一致。**
+23. **GitHub Actions 云端发版必须显式给 `permissions: contents: write`**（11-28）：`.github/workflows/build.yml` 用 `softprops/action-gh-release@v2` + `generate_release_notes: true` 时，默认只读 GITHUB_TOKEN 会让「发布到 GitHub Release」1 秒失败，annotation 原文 `Resource not accessible by integration - .../generate-release-notes-content`，而「构建（含 NSIS 安装包）」其实已成功。修复＝workflow 顶层加 `permissions: contents: write`；重发要把 tag force-move 到修复后的提交再推（旧 tag 上的 run 重跑仍用旧 workflow）。
 
 ---
 
@@ -256,7 +257,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 | 0.1.24 | 文件编辑/排序重构/16:9 网格（T-VV18） |
 | 0.1.25 | 最近入库视图 + 网格窗口化 + 进视口才抽帧 + v6 路径规范化去重；**库根收敛到 `F:\Hthings\Supervideo`** |
 | 0.1.26 | 画匣特性迁移：真无边框沉浸 / 播放器右键菜单 / 侧栏可拖宽 / 老板键 / 手势槽位 / Toast 分级；修 React #310 白屏 |
-| 1.2.7 | **hanime 解析器按真实页面重写**（管理员浏览器抓包实测）：`downloader.rs` 与油猴脚本同步改；13:40 装机。17:08 统一收尾：版本号提交 `af94cd0`、push master、打 v1.2.7 tag 走 GitHub Actions 云端 Release |
+| 1.2.7 | **hanime 解析器按真实页面重写**（管理员浏览器抓包实测）：`downloader.rs` 与油猴脚本同步改；13:40 装机。17:08 统一收尾：版本号提交 `af94cd0`、push master、打 v1.2.7 tag 走 GitHub Actions 云端 Release。首发 run `46129131771` 构建成功但发布步骤因工作流缺 `contents: write` 权限失败（17:17）；`8c8f95f` 补权限后把 v1.2.7 tag force-move 到修复提交，重跑 run `46131603070` |
 | 1.2.6 | **WE 导出增量同步 + hanime 直链 + 云端构建**：`we-export` 导出后改 `sync-collections` 纯 SQL 增量同步（不再全库扫描）；hanime 直链媒体识别、油猴脚本从 DOM 抓真实直链；新增 `.github/workflows/build.yml`（打 `v*` tag 自动发 Release）；12:05 装机 |
 | 1.2.5 | 03:01 装机（本地包在 `src-tauri/target/release/bundle/nsis/`，无广播、未打 tag）；内容沿 1.2.4 主线，至 1.2.6 才补登记 |
 | 1.2.4 | **壁纸导出状态可视化**：助手加 `/status`（进度/成功失败/最近结果），copy 改异步+进度；面板加「导出状态」卡（进度条/阶段/当前文件 + 成功/失败/跳过徽标）与「最近导出」列表，原始日志折叠为排查用 |
