@@ -257,7 +257,7 @@ Shift 连选区间、Ctrl 单击切换、**空白处拖拽框选**（拖到边�
 | 0.1.24 | 文件编辑/排序重构/16:9 网格（T-VV18） |
 | 0.1.25 | 最近入库视图 + 网格窗口化 + 进视口才抽帧 + v6 路径规范化去重；**库根收敛到 `F:\Hthings\Supervideo`** |
 | 0.1.26 | 画匣特性迁移：真无边框沉浸 / 播放器右键菜单 / 侧栏可拖宽 / 老板键 / 手势槽位 / Toast 分级；修 React #310 白屏 |
-| 1.2.7 | **hanime 解析器按真实页面重写**（管理员浏览器抓包实测）：`downloader.rs` 与油猴脚本同步改；13:40 装机。17:08 统一收尾：版本号提交 `af94cd0`、push master、打 v1.2.7 tag 走 GitHub Actions 云端 Release。首发 run `46129131771` 构建成功但发布步骤因工作流缺 `contents: write` 权限失败（17:17）；`8c8f95f` 补权限后把 v1.2.7 tag force-move 到修复提交，重跑 run `46131603070` |
+| 1.2.7 | **hanime 解析器按真实页面重写**（管理员浏览器抓包实测）：`downloader.rs` 与油猴脚本同步改；13:40 装机。17:08 统一收尾：版本号提交 `af94cd0`、push master、打 v1.2.7 tag 走 GitHub Actions 云端 Release。首发 run `46129131771` 构建成功但发布步骤因工作流缺 `contents: write` 权限失败（17:17）；`8c8f95f` 补权限后把 v1.2.7 tag force-move 到修复提交，run `46131603070` **构建+发布均成功**（17:49:14 Release v1.2.7 已发布，asset `_1.2.7_x64-setup.exe` / label `影匣_1.2.7_x64-setup.exe` / 3,753,079 B / sha256 `f3036a0d…a99e811aa48a`；云端产物中文前缀被剥掉但下载链接正常） |
 | 1.2.6 | **WE 导出增量同步 + hanime 直链 + 云端构建**：`we-export` 导出后改 `sync-collections` 纯 SQL 增量同步（不再全库扫描）；hanime 直链媒体识别、油猴脚本从 DOM 抓真实直链；新增 `.github/workflows/build.yml`（打 `v*` tag 自动发 Release）；12:05 装机 |
 | 1.2.5 | 03:01 装机（本地包在 `src-tauri/target/release/bundle/nsis/`，无广播、未打 tag）；内容沿 1.2.4 主线，至 1.2.6 才补登记 |
 | 1.2.4 | **壁纸导出状态可视化**：助手加 `/status`（进度/成功失败/最近结果），copy 改异步+进度；面板加「导出状态」卡（进度条/阶段/当前文件 + 成功/失败/跳过徽标）与「最近导出」列表，原始日志折叠为排查用 |
