@@ -42,6 +42,16 @@ fn site_of(url: &str) -> String {
     host.trim_start_matches("www.").to_string()
 }
 
+/// URL 本身是不是直链媒体（.mp4/.webm/.m3u8…）：是就别当网页抓，直接下。
+fn is_direct_media(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("").to_ascii_lowercase();
+    const EXTS: &[&str] = &[
+        "mp4", "webm", "mkv", "m4v", "mov", "avi", "flv", "ts", "m3u8",
+        "mpg", "mpeg", "m2ts", "3gp", "wmv", "ogv", "f4v", "mts", "m2v", "asf",
+    ];
+    EXTS.iter().any(|e| path.ends_with(&format!(".{e}")))
+}
+
 /// 抓页面 HTML。只用于解析直链，绝不上传本地库内容。
 fn fetch_html(url: &str) -> Result<String, String> {
     fetch_html_with(url, None)
@@ -121,6 +131,23 @@ pub fn extract_candidates(html: &str, base: &str) -> Vec<MediaCandidate> {
 pub fn resolve(url: &str) -> Result<ResolveReport, String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("只支持 http/https 链接".into());
+    }
+    // 直链媒体（.mp4/.webm/.m3u8…）：本身就是视频，别再当网页抓 HTML
+    if is_direct_media(url) {
+        let name = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("video.mp4")
+            .split('?')
+            .next()
+            .unwrap_or("video.mp4")
+            .to_string();
+        return Ok(ResolveReport {
+            site: site_of(url),
+            title: name.clone(),
+            candidates: vec![MediaCandidate { url: url.to_string(), name, kind: "video".into() }],
+            note: "直链媒体，直接下载".into(),
+        });
     }
     if site_of(url).ends_with("hanime1.me") {
         return resolve_hanime(url);

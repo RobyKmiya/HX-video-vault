@@ -39,16 +39,44 @@
   }
   /** hanime1 的作者与标签都挂在 /search?query=...&type=uploader|genre 链接上 */
   function hanimeAuthor() {
-    const a = document.querySelector('a[href*="type=uploader"]');
+    const a =
+      document.querySelector('a[href*="type=uploader"]') ||
+      document.querySelector('a[href*="type=artist"]') ||
+      document.querySelector('a[href*="/artist/"]') ||
+      document.querySelector('a[href*="/uploader/"]');
     return txt(a?.textContent);
   }
   function hanimeTags() {
     const out = new Set();
-    document.querySelectorAll('a[href*="type=genre"]').forEach((a) => {
-      const t = txt(a.textContent);
-      if (t && t.length <= 20) out.add(t);
-    });
+    const push = (el) => {
+      const t = txt(el?.textContent);
+      if (t && t.length <= 24 && !/^\d+$/.test(t)) out.add(t);
+    };
+    document.querySelectorAll('a[href*="type=genre"], a[href*="/tags/"], a[href*="type=tag"]').forEach(push);
+    // 兜底：页面上带标签样式的链接（hanime 改版后 class 常带 tag）
+    if (out.size === 0) {
+      document.querySelectorAll('a.tag, a[class*="tag"], span[class*="tag"]').forEach(push);
+    }
     return [...out];
+  }
+
+  /** hanime1 的视频直链：从 DOM 里抓（mp4 是 JS 加载的，服务器 curl 抓不到） */
+  function hanimeVideoUrl() {
+    // 1) 标准 <video> 元素（含 source 子元素）
+    const v = $("video");
+    if (v) {
+      const src = v.currentSrc || v.src || ($("source", v) && $("source", v).src);
+      if (src && !src.startsWith("blob:")) return src;
+    }
+    // 2) og:video 系列 meta
+    const ogv = meta("og:video") || meta("og:video:url") || meta("og:video:secure_url");
+    if (ogv) return ogv;
+    // 3) 页面任意 <script>/JSON 里的 .mp4 直链（hanime 常把视频配置塞进 script 变量）
+    for (const s of document.querySelectorAll("script")) {
+      const m = (s.textContent || "").match(/https?:\\\/\\\/[^"'\\s]+?\.mp4(?:\\?[^"'\\s]*)?/i);
+      if (m) return m[0].replace(/\\\//g, "/");
+    }
+    return "";
   }
 
   /** 作者/上传者：优先站点特征，其次 meta，最后页面标题里的「- xxx」尾巴 */
@@ -275,15 +303,28 @@
   }
 
   async function onDownload() {
-    // hanime1：页面里是播放器，直链要带 Referer，交给影匣下载器最稳
+    // hanime1：直链要带 Referer，且 mp4 是 JS 加载的——优先从 DOM 拿直链交给影匣，
+    // 拿不到再回退到服务器端解析下载页。
     if (isHanime) {
       const id = hanimeId();
       if (!id) { setTip("这个页面没有作品号（不是 /watch?v= 页）", "bad"); return; }
-      setTip("正在让影匣解析最高画质…");
+      const p = payload();
+      try { await api("POST", "/hook", p, 15000); } catch (_) { /* 桥没开也不挡 */ }
+      const direct = hanimeVideoUrl();
+      if (direct && !/\.m3u8(\?|$)/i.test(direct)) {
+        setTip("已拿到视频直链，交给影匣下载…");
+        try {
+          const r = await api("POST", "/download", { url: direct, title: p.title, tags: p.tags }, 15000);
+          if (!r.ok) throw new Error(r.error || "影匣没能接单");
+          setTip("已交给影匣：进度在影匣「下载」面板看；下完自动入库并挂标签", "ok");
+          setStatus("影匣后台下载中", "ok");
+        } catch (e) { setTip(String(e.message || e), "bad"); }
+        return;
+      }
+      setTip(direct ? "页面拿到的是 m3u8/blob，改让影匣解析下载页…" : "页面里没拿到直链，改让影匣解析下载页…");
       try {
-        await api("POST", "/hook", payload(), 15000);     // 元数据先记下，下载完成后自动挂上
         const r = await api("POST", "/download", {
-          url: location.href, title: payload().title, tags: payload().tags,
+          url: location.href, title: p.title, tags: p.tags,
         }, 45000);
         if (!r.ok) throw new Error(r.error || "影匣没能接单");
         setTip("已交给影匣：后台解析最高画质并下载，进度在影匣「下载」面板看；下完自动入库并挂标签", "ok");
